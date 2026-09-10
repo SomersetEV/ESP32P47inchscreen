@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS "main.c" "can_decode.c" "vehicle_state.c" "rtc_time.c"
          "can_handler.c" "can_logger.c" "sd_store.c" "sd_host_init_shim.c"
+         "ble_nus.c"
          "ui/ui.c" "ui/ui_splash.c" "ui/ui_dash.c" "ui/sim_can.c"
     INCLUDE_DIRS "." "ui"
     EMBED_FILES "assets/logo.png" "assets/Montserrat-Medium.ttf"

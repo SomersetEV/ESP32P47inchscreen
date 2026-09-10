@@ -21,6 +21,7 @@
 #include "vehicle_state.h"
 #include "rtc_time.h"
 #include "can_logger.h"
+#include "ble_nus.h"
 #include "ui.h"
 #include "sim_can.h"
 
@@ -59,6 +60,13 @@ void app_main(void)
      * on core 0 alongside LVGL and BLE.
      */
     xTaskCreatePinnedToCore(can_logger_task, "canlog", 6144, NULL, 5, NULL, 0);
+
+    /*
+     * BLE. The P4 has no radio of its own: NimBLE runs here as a host-only
+     * stack and esp_hosted carries HCI over SDIO to the ESP32-C6, which holds
+     * the controller.
+     */
+    xTaskCreatePinnedToCore(ble_nus_task, "ble_nus", 8192, NULL, 4, NULL, 0);
 
     // No-op unless CONFIG_DASH_SIMULATE_CAN is set.
     sim_can_start();
