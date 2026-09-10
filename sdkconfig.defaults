@@ -56,3 +56,6 @@ CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_SECTOR_512=y
 
 CONFIG_NVS_ASSERT_ERROR_CHECK=n
+
+# Bench build: exercise the dash without a bus. Remove before fitting.
+CONFIG_DASH_SIMULATE_CAN=y

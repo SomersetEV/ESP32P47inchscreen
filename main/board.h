@@ -1,6 +1,8 @@
 #pragma once
 #include "driver/gpio.h"
 
+#define FW_VERSION "0.1.0"
+
 /*
  * board.h — Waveshare ESP32-P4-WIFI6-Touch-LCD-7B pin assignments
  *

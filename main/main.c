@@ -18,10 +18,11 @@
 #include "nvs_flash.h"
 
 #include "board.h"
+#include "vehicle_state.h"
+#include "ui.h"
+#include "sim_can.h"
 
 static const char *TAG = "MAIN";
-
-#define FW_VERSION "0.1.0"
 
 void app_main(void)
 {
@@ -37,5 +38,16 @@ void app_main(void)
         ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(ret));
     }
 
-    ESP_LOGI(TAG, "Stage 0 skeleton alive");
+    vehicle_state_init();
+
+    // Display first, so the splash is up within about a second of power-on
+    // while the rest of the system starts behind it.
+    if (ui_start() != ESP_OK) {
+        ESP_LOGE(TAG, "Display failed to start");
+    }
+
+    // No-op unless CONFIG_DASH_SIMULATE_CAN is set.
+    sim_can_start();
+
+    ESP_LOGI(TAG, "Boot complete");
 }
