@@ -19,6 +19,7 @@
 
 #include "board.h"
 #include "vehicle_state.h"
+#include "rtc_time.h"
 #include "ui.h"
 #include "sim_can.h"
 
@@ -45,6 +46,9 @@ void app_main(void)
     if (ui_start() != ESP_OK) {
         ESP_LOGE(TAG, "Display failed to start");
     }
+
+    // The BSP has already brought up the shared I2C bus by this point.
+    rtc_time_init();
 
     // No-op unless CONFIG_DASH_SIMULATE_CAN is set.
     sim_can_start();
