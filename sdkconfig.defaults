@@ -1,0 +1,58 @@
+# ── Target / silicon ──────────────────────────────────────────────────────────
+CONFIG_IDF_TARGET="esp32p4"
+# The plan quoted Waveshare's rev3 profile, but this physical board reports
+# chip revision v1.3. IDF treats P4 rev <3.0 and >=3.0 as mutually exclusive
+# builds, so rev1 support has to be opted into explicitly before the rev-min
+# choice will even offer v1.0.
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+
+# ── Flash / partitions ────────────────────────────────────────────────────────
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x9000
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+
+# ── PSRAM / cache ─────────────────────────────────────────────────────────────
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
+
+# ── LVGL ──────────────────────────────────────────────────────────────────────
+CONFIG_LV_CONF_SKIP=y
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_OS_FREERTOS=y
+CONFIG_LV_DEF_REFR_PERIOD=15
+CONFIG_LV_USE_TINY_TTF=y
+CONFIG_LV_USE_LODEPNG=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_USE_CLIB_MALLOC=y
+
+# ── Bluetooth: NimBLE host on P4, controller lives on the ESP32-C6 ────────────
+# The P4 has no radio. esp_hosted carries HCI over SDIO to the C6.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_DISABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_NIMBLE_TRANSPORT_UART=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED=y
+CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE=y
+CONFIG_ESP_HOSTED_NIMBLE_HCI_VHCI=y
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
+
+# ── FATFS ─────────────────────────────────────────────────────────────────────
+CONFIG_FATFS_CODEPAGE_850=y
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_SECTOR_512=y
+
+CONFIG_NVS_ASSERT_ERROR_CHECK=n

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'COM\\\\d+' } | Select-Object -ExpandProperty Name)",
+      "Read(//c/esp/v6.0.1/esp-idf/components/esp_psram/esp32p4/**)",
+      "PowerShell(Remove-Item \"C:\\\\Users\\\\benay\\\\Documents\\\\GitHub\\\\ESP32P47inchscreen\\\\sdkconfig\" -Force -ErrorAction SilentlyContinue; & \"C:\\\\esp\\\\v6.0.1\\\\esp-idf\\\\export.ps1\" | Out-Null; idf.py build 2>&1 | Select-String -Pattern \"fatal error|error:|FAILED:|Project build complete|ninja failed\" | Select-Object -Last 15; Write-Output \"--- effective rev config ---\"; Select-String -Path \"C:\\\\Users\\\\benay\\\\Documents\\\\GitHub\\\\ESP32P47inchscreen\\\\sdkconfig\" -Pattern \"REV_MIN_FULL|SELECTS_REV_LESS|SPIRAM_SPEED=\" | ForEach-Object { $_.Line })"
+    ]
+  }
+}

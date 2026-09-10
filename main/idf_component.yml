@@ -1,0 +1,9 @@
+dependencies:
+  waveshare/esp32_p4_wifi6_touch_lcd_7b: "==3.0.1"
+  lvgl/lvgl:
+    version: "==9.5.0"
+    public: true
+  espressif/esp_hosted: "~2.0"
+  espressif/esp_wifi_remote: "~1.3"
+  waveshare/pcf85063a: "^2.0.1"
+  idf: ">=6.0"

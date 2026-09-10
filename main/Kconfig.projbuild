@@ -1,0 +1,33 @@
+menu "Tractor Dash"
+
+    config DASH_SIMULATE_CAN
+        bool "Generate synthetic CAN frames (bench only)"
+        default n
+        help
+            Feed fake frames for every decoded ID through the normal decode path
+            so the dash can be exercised without a bus. Never enable on the
+            tractor: the values are meaningless and they are logged like real
+            frames.
+
+    config DASH_CURRENT_DIVISOR
+        int "ISA shunt current divisor"
+        default 100
+        help
+            Raw 0x521 current is divided by this to give amps. The Nextion dash
+            used 100. Change only if the shunt scaling changes.
+
+    config DASH_MPH_PER_RPM
+        string "Miles per hour per motor RPM"
+        default "0.008"
+        help
+            Speed is derived from motor RPM alone (no wheel sensor):
+            mph = rpm * this. 0.008 matches the Nextion dash for the fitted
+            final drive.
+
+    config DASH_TZ
+        string "POSIX timezone for the on-screen clock"
+        default "GMT0BST,M3.5.0/1,M10.5.0"
+        help
+            Logs are always UTC. This only affects the clock on the dash.
+
+endmenu
