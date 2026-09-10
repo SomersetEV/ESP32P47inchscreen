@@ -20,6 +20,7 @@
 #include "board.h"
 #include "vehicle_state.h"
 #include "rtc_time.h"
+#include "can_logger.h"
 #include "ui.h"
 #include "sim_can.h"
 
@@ -49,6 +50,15 @@ void app_main(void)
 
     // The BSP has already brought up the shared I2C bus by this point.
     rtc_time_init();
+
+    /*
+     * One task, pinned to core 0, which mounts the card and opens the session
+     * files before bringing up CAN — so frames cannot arrive before there is
+     * somewhere to put them. It hands the TWAI install to a short-lived core-1
+     * task, which keeps the RX ISR on core 1 and all the blocking SD I/O here
+     * on core 0 alongside LVGL and BLE.
+     */
+    xTaskCreatePinnedToCore(can_logger_task, "canlog", 6144, NULL, 5, NULL, 0);
 
     // No-op unless CONFIG_DASH_SIMULATE_CAN is set.
     sim_can_start();

@@ -25,9 +25,10 @@ extern lv_font_t *ui_font_small;   // bottom grid
 lv_obj_t *ui_splash_create(void);
 lv_obj_t *ui_dash_create(void);
 
-// Update the top-bar status chips. Safe to call from any task: it takes the
-// LVGL lock itself.
-void ui_dash_set_status(bool sd_logging, bool ble_connected, bool trip_active);
+// Update the BLE chip in the top bar. Safe to call from any task: it takes the
+// LVGL lock itself. The SD and trip chips are polled by the dash refresh timer
+// and need no equivalent.
+void ui_dash_set_ble(bool connected);
 
 // Called by the splash timer when the hold expires: fades the dash in and
 // starts the dash refresh timer.

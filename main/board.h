@@ -28,4 +28,7 @@
 
 // ── MicroSD (BSP-owned, SDMMC slot 0, 4-bit) ─────────────────────────────────
 // CLK 43, CMD 44, D0-D3 39/40/41/42, powered by on-chip LDO channel 4.
-#define MOUNT_POINT "/sdcard"
+// The BSP mounts the card itself, so follow its mount point rather than
+// declaring a second one that could drift out of step with it.
+#include "bsp/esp32_p4_wifi6_touch_lcd_7b.h"
+#define MOUNT_POINT BSP_SD_MOUNT_POINT

@@ -8,6 +8,7 @@
 #include "board.h"
 #include "ui.h"
 #include "vehicle_state.h"
+#include "can_logger.h"
 
 /*
  * The dash. 1024x600, laid out as:
@@ -162,6 +163,17 @@ static void refresh_cb(lv_timer_t *t)
         set_text_if_changed(s_date, "no clock");
     }
 
+    // ── Status chips ────────────────────────────────────────────────────────
+    // Driven from here rather than pushed in from the logger: this timer
+    // already holds the LVGL lock, and the state is only ever polled.
+    const bool logging = can_logger_is_logging();
+    set_text_if_changed(s_chip_sd, logging ? "SD LOG" : "NO SD");
+    set_colour_if_changed(s_chip_sd, logging ? UI_COL_ACCENT : UI_COL_ALERT);
+
+    const bool trip = can_logger_trip_active();
+    set_text_if_changed(s_chip_trip, trip ? "TRIP" : "");
+    set_colour_if_changed(s_chip_trip, UI_COL_WARN);
+
     // ── Main three ──────────────────────────────────────────────────────────
     if (fresh) {
         snprintf(buf, sizeof(buf), "%d", r->motor_rpm);
@@ -232,16 +244,17 @@ static void refresh_cb(lv_timer_t *t)
     set_text_if_changed(s_cell[C_DELTA].value, buf);
 }
 
-void ui_dash_set_status(bool sd_logging, bool ble_connected, bool trip_active)
+/*
+ * BLE connection state is pushed in, unlike the SD and trip chips: it lives in
+ * the BLE task and is event-driven rather than pollable, so there is nothing
+ * for the refresh timer to read.
+ */
+void ui_dash_set_ble(bool connected)
 {
-    if (!s_chip_sd) return;
+    if (!s_chip_ble) return;
     bsp_display_lock(0);
-    set_text_if_changed(s_chip_sd, sd_logging ? "SD LOG" : "NO SD");
-    set_colour_if_changed(s_chip_sd, sd_logging ? UI_COL_ACCENT : UI_COL_ALERT);
-    set_text_if_changed(s_chip_ble, ble_connected ? "BLE" : "---");
-    set_colour_if_changed(s_chip_ble, ble_connected ? UI_COL_ACCENT : UI_COL_DIM);
-    set_text_if_changed(s_chip_trip, trip_active ? "TRIP" : "");
-    set_colour_if_changed(s_chip_trip, UI_COL_WARN);
+    set_text_if_changed(s_chip_ble, connected ? "BLE" : "---");
+    set_colour_if_changed(s_chip_ble, connected ? UI_COL_ACCENT : UI_COL_DIM);
     bsp_display_unlock();
 }
 
