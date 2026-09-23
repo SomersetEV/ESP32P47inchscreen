@@ -5,15 +5,18 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
-#include "can_decode.h"
+#include <string.h>
+
+#include "can_logger.h"
 #include "sim_can.h"
 
 /*
  * Bench-only synthetic CAN.
  *
- * Builds frames for every ID the dash decodes and pushes them through
- * can_decode_frame(), the same entry point the real bus uses, so what is
- * exercised here is the real decode and display path — not a parallel one.
+ * Builds frames for every ID the dash decodes and submits them to the logger
+ * queue, the same place the real RX ISR puts them. So what is exercised here is
+ * the real decode, log and display path, not a parallel one, and the logger
+ * task stays the only writer of vehicle_state.
  *
  * Currently pinned to a fixed scenario (constant RPM/speed/power, everything
  * else static) rather than the usual sine sweep — see the constants below.
@@ -48,10 +51,9 @@ static void put_isa(uint8_t *d, int32_t v)
 
 static void emit(uint32_t id, const uint8_t *data, uint8_t dlc)
 {
-    raw_can_log_t f = { .tick_ms = (uint32_t)(esp_timer_get_time() / 1000),
-                        .id = id, .dlc = dlc };
+    can_frame_t f = { .us = esp_timer_get_time(), .id = id, .dlc = dlc };
     memcpy(f.data, data, dlc);
-    can_decode_frame(&f);
+    can_logger_submit(&f);
 }
 
 static void sim_cb(void *arg)

@@ -57,6 +57,13 @@ CONFIG_FATFS_SECTOR_512=y
 
 CONFIG_NVS_ASSERT_ERROR_CHECK=n
 
+# ── TWAI ──────────────────────────────────────────────────────────────────────
+# Keep the RX ISR running while the cache is off for a flash write (every NVS
+# commit, e.g. claim_log_id() on each session rotation). Without this the ISR
+# is deferred, the few-frame hardware RX FIFO overruns, and the lost frames
+# never reach s_drops. The callbacks it reaches must then be IRAM_ATTR.
+CONFIG_TWAI_ISR_CACHE_SAFE=y
+
 # ── Bench-only synthetic CAN ──────────────────────────────────────────────────
 # Feeds fake frames through the real decode path so the dash can be exercised
 # without a bus. Never leave this enabled on the tractor: the values are

@@ -273,27 +273,22 @@ static void handle_time_command(uint32_t unix_epoch)
 {
     /*
      * Phone sends current Unix timestamp on connect.
-     * We store (unix_epoch - tick_ms/1000) as a soft RTC offset.
-     * All subsequent log records can be timestamped: unix = offset + tick_ms/1000
-     * Persists only in RAM — resets on next power cycle until phone reconnects.
+     *
+     * The telematics board kept (unix_epoch - tick_ms/1000) in
+     * vehicle_state as a soft RTC offset. This board sets the system clock
+     * and writes the RTC instead, so the time survives a power cycle and the
+     * logs carry real dates without the phone. The offset is no longer
+     * stored: vehicle_state has one writer (the logger task), and nothing
+     * written to SD or BLE reads that field.
      */
-    vehicle_state_t *state = vehicle_state_get();
     uint32_t current_tick_ms = (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount());
-    state->latest.unix_offset = (int32_t)unix_epoch
-                              - (int32_t)(current_tick_ms / 1000);
+    int32_t  offset = (int32_t)unix_epoch - (int32_t)(current_tick_ms / 1000);
 
-    /*
-     * Unlike the telematics board, this one also sets the system clock and
-     * writes the RTC, so the time survives a power cycle and the logs carry
-     * real dates without the phone. The offset above is still maintained for
-     * the app, which computes timestamps from it.
-     */
     rtc_time_set((time_t)unix_epoch);
 
     nus_notify_str("OK\n");
     ESP_LOGI(TAG, "TIME synced: unix=%lu tick=%lu offset=%ld",
-             unix_epoch, (unsigned long)current_tick_ms,
-             (long)state->latest.unix_offset);
+             unix_epoch, (unsigned long)current_tick_ms, (long)offset);
 }
 
 static void handle_trip_marker(trip_marker_t type)
@@ -309,10 +304,20 @@ static void handle_trip_marker(trip_marker_t type)
         return;
     }
 
-    // Wait for the logger to close the files and rotate the session before
-    // replying, so the phone can sync the finished session immediately.
-    if (type == TRIP_MARKER_END) {
-        can_logger_wait_rotate(2000);
+    /*
+     * Wait for the logger to act on the marker before replying. For TRIP_END
+     * that means the files are closed and the next session is open, so the
+     * phone can sync the finished session immediately. For TRIP_START it means
+     * the marker really reached a log file; with no card there is nothing to
+     * start, and replying OK would tell the phone a trip is recording.
+     */
+    bool ok = false;
+    if (!can_logger_wait_marker(2000, &ok)) {
+        ESP_LOGW(TAG, "Logger did not handle the trip marker in time");
+    } else if (!ok) {
+        nus_notify_str("ERR no_log\n");
+        ESP_LOGW(TAG, "Trip marker failed - no log file open");
+        return;
     }
     nus_notify_str("OK\n");
     ESP_LOGI(TAG, "Trip marker queued: %s",

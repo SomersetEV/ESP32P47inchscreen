@@ -100,6 +100,11 @@ esp_err_t ui_start(void)
     cfg.lv_adapter_cfg.task_stack_size = 16 * 1024;
     cfg.lv_adapter_cfg.stack_in_psram  = true;
 
+    // The adapter default is no core affinity, which lets LVGL drift onto
+    // core 1 and breaks the core split. Pin it to core 0; the logger task
+    // outranks it there (see main.c), so rendering cannot stall the drain.
+    cfg.lv_adapter_cfg.task_core_id = 0;
+
     lv_display_t *disp = bsp_display_start_with_config(&cfg);
     if (!disp) {
         ESP_LOGE(TAG, "bsp_display_start_with_config failed");
@@ -133,8 +138,12 @@ esp_err_t ui_start(void)
     lv_screen_load(s_splash);
 
     int *pct = malloc(sizeof(int));
-    *pct = 0;
-    lv_timer_create(backlight_ramp_cb, BACKLIGHT_STEP_MS, pct);
+    if (pct) {
+        *pct = 0;
+        lv_timer_create(backlight_ramp_cb, BACKLIGHT_STEP_MS, pct);
+    } else {
+        bsp_display_brightness_set(100);   // no ramp, but not left dark
+    }
 
     lv_timer_create(splash_done_cb, SPLASH_HOLD_MS, NULL);
 

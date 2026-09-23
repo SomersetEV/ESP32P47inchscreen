@@ -96,6 +96,20 @@ bool sd_store_mount(void)
     return true;
 }
 
+bool sd_store_remount(void)
+{
+    if (s_card) {
+        // Slot teardown inside the unmount is a no-op via the shim in
+        // sd_host_init_shim.c, so this cannot take the C6's slot 1 down.
+        esp_err_t err = esp_vfs_fat_sdcard_unmount(MOUNT_POINT, s_card);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Unmount failed: %s", esp_err_to_name(err));
+        }
+        s_card = NULL;
+    }
+    return sd_store_mount();
+}
+
 // ── Free space ────────────────────────────────────────────────────────────────
 
 static bool fat_info(uint64_t *total, uint64_t *freeb)

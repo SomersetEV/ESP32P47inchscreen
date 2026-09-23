@@ -23,6 +23,16 @@ vehicle_state_t *vehicle_state_get(void)
     return &s_state;
 }
 
+void vehicle_state_lock(void)
+{
+    portENTER_CRITICAL(&s_lock);
+}
+
+void vehicle_state_unlock(void)
+{
+    portEXIT_CRITICAL(&s_lock);
+}
+
 void vehicle_state_snapshot(vehicle_state_t *out)
 {
     portENTER_CRITICAL(&s_lock);

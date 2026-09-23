@@ -82,6 +82,16 @@ vehicle_state_t *vehicle_state_get(void);
  */
 void vehicle_state_snapshot(vehicle_state_t *out);
 
+/*
+ * Held by the single writer around each update. The readers' critical section
+ * only yields a coherent copy if the writer takes the same lock; without it a
+ * reader on the other core can see a half-written struct (the 64-bit
+ * last_frame_us, or power_w out of step with pack_current_ma). Keep it short:
+ * one frame's decode, never a whole batch.
+ */
+void vehicle_state_lock(void);
+void vehicle_state_unlock(void);
+
 // True when a frame has arrived within the last stale_ms. The dash blanks every
 // value to "--" when this goes false.
 bool vehicle_state_is_fresh(uint32_t stale_ms);

@@ -42,11 +42,21 @@ typedef enum {
 } trip_marker_t;
 
 // Post a marker to the logger task. Returns false if the queue is full.
+// Clears any stale completion first, so a following can_logger_wait_marker()
+// waits for *this* marker rather than one whose earlier wait timed out.
 bool can_logger_post_marker(trip_marker_t type);
 
-// Block until a TRIP_END rotation has finished, so the caller can reply to the
-// phone only once the new session is really in place. Returns false on timeout.
-bool can_logger_wait_rotate(uint32_t timeout_ms);
+/*
+ * Block until the logger has handled the posted marker, so the caller replies
+ * to the phone only once it has really taken effect (for TRIP_END, the new
+ * session is open). *ok is set to whether the marker reached a log file.
+ * Returns false on timeout, leaving *ok untouched.
+ */
+bool can_logger_wait_marker(uint32_t timeout_ms, bool *ok);
+
+// Queue a frame from task context. Bench simulation only: it takes the same
+// path as a real frame, so simulated data is decoded *and* logged.
+void can_logger_submit(const can_frame_t *f);
 
 // Current session number, for the BLE STATUS reply.
 uint32_t can_logger_session_id(void);

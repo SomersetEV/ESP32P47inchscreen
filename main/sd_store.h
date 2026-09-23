@@ -12,6 +12,14 @@
 // Mount the card. Returns false on failure; caller is expected to retry.
 bool sd_store_mount(void);
 
+/*
+ * Unmount (if mounted) and mount again, so a reseated or swapped card is
+ * picked up. sd_store_mount() alone cannot do this: on a mounted volume it
+ * fails with ESP_ERR_INVALID_STATE and leaves the stale mount in place.
+ * The caller must have closed every open file on the card first.
+ */
+bool sd_store_remount(void);
+
 // Free space on the mounted volume, in bytes. Returns 0 if unavailable.
 uint64_t sd_store_free_bytes(void);
 

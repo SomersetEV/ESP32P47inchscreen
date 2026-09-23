@@ -29,6 +29,18 @@ static inline int32_t isa_int32(const uint8_t *d)
                      ((uint32_t)d[3] << 8)  |  (uint32_t)d[2]);
 }
 
+/*
+ * DASH_MPH_PER_RPM is a Kconfig string, parsed once here rather than per 0x1DA
+ * frame. It cannot be parsed lazily inside can_decode_frame(): that runs under
+ * the vehicle_state critical section, and strtod may allocate.
+ */
+static float s_mph_per_rpm;
+
+void can_decode_init(void)
+{
+    s_mph_per_rpm = (float)atof(CONFIG_DASH_MPH_PER_RPM);
+}
+
 void can_decode_frame(const raw_can_log_t *f)
 {
     vehicle_state_t *s = vehicle_state_get();
@@ -47,7 +59,7 @@ void can_decode_frame(const raw_can_log_t *f)
             r->motor_rpm = raw / 2;
 
             // mph = rpm * DASH_MPH_PER_RPM, kept as x10 for one decimal place.
-            float mph = (float)r->motor_rpm * (float)atof(CONFIG_DASH_MPH_PER_RPM);
+            float mph = (float)r->motor_rpm * s_mph_per_rpm;
             s->speed_mph_x10 = (int16_t)(mph * 10.0f);
         }
         break;
@@ -65,8 +77,12 @@ void can_decode_frame(const raw_can_log_t *f)
         }
         break;
 
-    case 0x356:   // M3 BMS: pack temperature, 0.1 °C units
+    case 0x356:   // M3 BMS: pack voltage (0.01 V) and temperature (0.1 °C)
         if (f->dlc >= 6) {
+            // Bytes 0-1, little-endian, as the telematics firmware decoded it.
+            // Feeds the SNAP1 pack_v_bms_mv column, which was otherwise always 0.
+            r->pack_voltage_bms = (uint16_t)(((uint16_t)d[1] << 8) | d[0]);
+
             int16_t raw = (int16_t)(((uint16_t)d[5] << 8) | d[4]);
             // The sketch showed a single pack temperature; the log record keeps
             // the telematics min/max pair, so both carry the same value.

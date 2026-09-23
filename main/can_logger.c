@@ -38,13 +38,17 @@
 #include "sd_store.h"
 #include "vehicle_state.h"
 #include "rtc_time.h"
+#include "ble_nus.h"
 #include "board.h"
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/idf_additions.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,15 +66,24 @@ static const char *TAG = "CANLOG";
 // 1 Hz snapshot cadence for snap_NNNN.csv.
 #define SNAP_INTERVAL_MS  1000
 
-// A saturated 500 kbps bus is ~3800 frames/s. 512 entries buys ~130 ms of
-// absorption for an SD write stall, at ~11 KB of RAM.
-#define FRAME_QUEUE_DEPTH 512
+// A saturated 500 kbps bus is ~3800 frames/s. 4096 entries buys ~1 s of
+// absorption, at ~96 KB of internal RAM. That covers a slow two-file fsync or
+// the unlink of a large old session during reclaim, either of which can block
+// the drain for well over the ~130 ms the old 512-entry queue gave.
+#define FRAME_QUEUE_DEPTH 4096
+
+// Frames drained per pass before the housekeeping runs again. Bounded so the
+// flush cadence holds under sustained load.
+#define DRAIN_BATCH_MAX   512
 
 // Durability cadence. Worst-case data loss on a power cut is one interval.
 #define FLUSH_INTERVAL_MS 1000
 
 // A multiple of the 512-byte FAT sector, so libc hands FATFS whole sectors.
-#define FILE_BUF_BYTES 4096
+// 16 KB means a handful of multi-sector writes per second at full bus load
+// rather than ~40 small ones. Nothing extra is at risk on a power cut: the
+// buffer is flushed and fsync'd by commit() every FLUSH_INTERVAL_MS.
+#define FILE_BUF_BYTES 16384
 
 // Retention: keep 10% of the card free, checked once a minute.
 #define FREE_SPACE_PCT      10
@@ -111,7 +124,14 @@ static uint32_t  s_reopens        = 0;  // files abandoned after write errors
 
 static FILE            *s_snap = NULL;
 static QueueHandle_t    s_marker_queue = NULL;
-static SemaphoreHandle_t s_rotate_sem  = NULL;
+static SemaphoreHandle_t s_marker_sem  = NULL;   // given when a marker is handled
+static volatile bool     s_marker_ok   = false;  // its outcome, set before the give
+
+// Wall-clock minus esp_timer, in microseconds, sampled once per drain pass.
+// Adding it to a frame's ISR stamp gives the wall-clock time the frame
+// *arrived*, not the time it was written, which lags by the queue latency.
+static int64_t s_unix_off_us = 0;
+static bool    s_unix_off_ok = false;
 
 static bool     s_trip_active = false;
 static uint32_t s_trip_start_tick;
@@ -130,14 +150,27 @@ bool     can_logger_is_logging(void)  { return s_file != NULL; }
 
 bool can_logger_post_marker(trip_marker_t type)
 {
-    if (!s_marker_queue) return false;
+    if (!s_marker_queue || !s_marker_sem) return false;
+    // A wait that timed out leaves its completion behind; clear it so the next
+    // wait cannot return early on the previous marker's give.
+    xSemaphoreTake(s_marker_sem, 0);
     return xQueueSend(s_marker_queue, &type, pdMS_TO_TICKS(100)) == pdTRUE;
 }
 
-bool can_logger_wait_rotate(uint32_t timeout_ms)
+bool can_logger_wait_marker(uint32_t timeout_ms, bool *ok)
 {
-    if (!s_rotate_sem) return false;
-    return xSemaphoreTake(s_rotate_sem, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+    if (!s_marker_sem) return false;
+    if (xSemaphoreTake(s_marker_sem, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        return false;
+    }
+    if (ok) *ok = s_marker_ok;
+    return true;
+}
+
+static void marker_done(bool ok)
+{
+    s_marker_ok = ok;
+    if (s_marker_sem) xSemaphoreGive(s_marker_sem);
 }
 
 // Wall-clock milliseconds, or 0 while the clock is unset. The raw log carries
@@ -153,7 +186,12 @@ static uint64_t unix_ms_now(void)
 
 // ── ISR entry points ──────────────────────────────────────────────────────────
 
-void can_logger_submit_from_isr(const can_frame_t *f, BaseType_t *woken)
+/*
+ * IRAM_ATTR because the TWAI ISR is cache-safe (CONFIG_TWAI_ISR_CACHE_SAFE):
+ * it keeps running while a flash write has the cache off, and everything it
+ * calls must be reachable then too.
+ */
+void IRAM_ATTR can_logger_submit_from_isr(const can_frame_t *f, BaseType_t *woken)
 {
     if (s_frame_queue == NULL) return;
     if (xQueueSendFromISR(s_frame_queue, f, woken) != pdTRUE) {
@@ -161,9 +199,17 @@ void can_logger_submit_from_isr(const can_frame_t *f, BaseType_t *woken)
     }
 }
 
-void can_logger_notify_bus_off_from_isr(void)
+void IRAM_ATTR can_logger_notify_bus_off_from_isr(void)
 {
     s_bus_off = true;
+}
+
+void can_logger_submit(const can_frame_t *f)
+{
+    if (s_frame_queue == NULL) return;
+    if (xQueueSend(s_frame_queue, f, 0) != pdTRUE) {
+        s_drops++;
+    }
 }
 
 // ── NVS: the per-power-cycle file counter ─────────────────────────────────────
@@ -384,52 +430,116 @@ static bool reopen_log(void)
 }
 
 /*
- * Format one frame as CSV. Built into a single buffer and written with one
- * fwrite — the previous implementation issued up to twelve fprintf calls per
- * frame, which is far too much overhead at full bus rate.
+ * Drop the mount and mount again, so a card that was reseated or swapped is
+ * actually picked up. Any files still open belong to the old mount and are
+ * closed first. The retention target is recomputed because the new card
+ * may be a different size.
+ */
+static bool remount_card(void)
+{
+    if (s_file) { fclose(s_file); s_file = NULL; }
+    if (s_snap) { fclose(s_snap); s_snap = NULL; }
+
+    if (!sd_store_remount()) return false;
+    s_want_free = sd_store_total_bytes() * FREE_SPACE_PCT / 100;
+    return true;
+}
+
+/*
+ * Hand-rolled number formatting for the per-frame path. snprintf with 64-bit
+ * conversions, called once per field and again per data byte, was the bulk of
+ * the logger's CPU time at full bus rate. These produce exactly what the
+ * "%lld" / "%llu" / "%0*lX" / "%02X" conversions did.
+ */
+static const char HEXDIGITS[] = "0123456789ABCDEF";
+
+static char *put_u32(char *p, uint32_t v)
+{
+    char tmp[10];
+    int  n = 0;
+    do { tmp[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (n) *p++ = tmp[--n];
+    return p;
+}
+
+// One 64-bit divide per call rather than one per digit, which matters on a
+// 32-bit core where each is a library call.
+static char *put_u64(char *p, uint64_t v)
+{
+    if (v <= UINT32_MAX) return put_u32(p, (uint32_t)v);
+
+    uint64_t hi = v / 1000000000u;
+    uint32_t lo = (uint32_t)(v - hi * 1000000000u);
+    p = put_u64(p, hi);
+    for (int i = 8; i >= 0; i--) { p[i] = (char)('0' + lo % 10); lo /= 10; }
+    return p + 9;
+}
+
+// Uppercase hex, zero-padded to at least min_digits, like "%0*lX".
+static char *put_hex(char *p, uint32_t v, int min_digits)
+{
+    int digits = 1;
+    for (uint32_t t = v >> 4; t; t >>= 4) digits++;
+    if (digits < min_digits) digits = min_digits;
+    for (int i = digits - 1; i >= 0; i--) { p[i] = HEXDIGITS[v & 0xF]; v >>= 4; }
+    return p + digits;
+}
+
+/*
+ * Sample the wall-clock offset once per drain pass rather than calling
+ * gettimeofday() per frame. The two clocks tick together, so the offset only
+ * moves when the time is set (RTC at boot, or the phone's TIME command).
+ */
+static void refresh_unix_offset(void)
+{
+    if (!rtc_time_valid()) { s_unix_off_ok = false; return; }
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    int64_t unix_us = (int64_t)tv.tv_sec * 1000000LL + tv.tv_usec;
+    s_unix_off_us = unix_us - esp_timer_get_time();
+    s_unix_off_ok = true;
+}
+
+/*
+ * Format one frame as CSV into a single buffer and write it with one fwrite.
  *
  * Extended IDs print as 8 hex digits and standard as 3, so the two are
  * distinguishable at a glance as well as via the ext column.
+ *
+ * unix_ms is derived from the ISR's receive stamp, so it agrees with the us
+ * column. It used to be read at write time, which put it behind by however
+ * long the frame had sat in the queue.
  */
 static void write_frame(const can_frame_t *f)
 {
     if (!s_file) return;
 
-    // Worst case is ~64 chars (20-digit us + 13-digit unix_ms + 8-digit ID +
-    // 8 data bytes), so this cannot truncate. snprintf still returns the length
-    // it *would* have written, so clamp n regardless rather than trusting the
-    // arithmetic.
-    char   line[128];
-    size_t n = 0;
-    int    w;
+    // Worst case: 20 + 1 + 20 + 1 + 10 + 7 + 23 + 1 = 83 chars.
+    char  line[128];
+    char *p = line;
 
-    w = snprintf(line, sizeof(line), "%lld,%llu,0x%0*lX,%u,%u,%u,",
-                 (long long)f->us,
-                 (unsigned long long)unix_ms_now(),
-                 f->ext ? 8 : 3, (unsigned long)f->id,
-                 (unsigned)f->ext, (unsigned)f->rtr,
-                 (unsigned)f->dlc);
-    if (w < 0) return;
-    n = (size_t)w < sizeof(line) ? (size_t)w : sizeof(line) - 1;
+    uint64_t unix_ms = s_unix_off_ok
+                     ? (uint64_t)(f->us + s_unix_off_us) / 1000u
+                     : 0;
+    uint8_t  dlc = f->dlc <= 8 ? f->dlc : 8;
 
-    for (uint8_t i = 0; i < f->dlc; i++) {
-        w = snprintf(line + n, sizeof(line) - n,
-                     "%s%02X", i ? " " : "", f->data[i]);
-        if (w < 0) break;
-        if ((size_t)w >= sizeof(line) - n) { n = sizeof(line) - 1; break; }
-        n += (size_t)w;
+    p = put_u64(p, (uint64_t)f->us);  *p++ = ',';
+    p = put_u64(p, unix_ms);          *p++ = ',';
+    *p++ = '0'; *p++ = 'x';
+    p = put_hex(p, f->id, f->ext ? 8 : 3);  *p++ = ',';
+    p = put_u32(p, f->ext);           *p++ = ',';
+    p = put_u32(p, f->rtr);           *p++ = ',';
+    p = put_u32(p, dlc);              *p++ = ',';
+
+    for (uint8_t i = 0; i < dlc; i++) {
+        if (i) *p++ = ' ';
+        *p++ = HEXDIGITS[f->data[i] >> 4];
+        *p++ = HEXDIGITS[f->data[i] & 0xF];
     }
+    *p++ = '\n';
 
-    /*
-     * Guarantee room for the newline in one place rather than relying on the
-     * clamps above all agreeing. They are unreachable for well-formed frames,
-     * so they have never been exercised — this makes the invariant hold even
-     * if the format strings change later.
-     */
-    if (n > sizeof(line) - 1) n = sizeof(line) - 1;
-    line[n++] = '\n';
-
-    fwrite(line, 1, n, s_file);
+    fwrite(line, 1, (size_t)(p - line), s_file);
     s_written++;
 }
 
@@ -463,8 +573,12 @@ static void note_drops(void)
 
 static void handle_trip_start(void)
 {
-    // After a TRIP_END rotation both files are closed; open the new pair now.
-    if (!s_file && !open_log()) return;
+    // Normally the pair is already open. If it is not (no card, or the last
+    // rotation could not open the next file), try once more now.
+    if (!s_file && !open_log()) {
+        marker_done(false);   // nothing to record the trip in; tell the phone
+        return;
+    }
     if (!s_snap) open_snap();
 
     vehicle_state_t st;
@@ -486,19 +600,24 @@ static void handle_trip_start(void)
     if (s_snap) fprintf(s_snap, "TRIP_START,,,,,,,,,,,,,,,\n");
     commit();
 
+    marker_done(true);
     ESP_LOGI(TAG, "Trip started - soc=%u%%", s_trip_start_soc);
 }
 
 /*
  * Close both files and rotate to a new session straight away, so the finished
  * session can be listed and fetched by the phone while the logger keeps
- * recording into the next one. The next frame reopens lazily.
+ * recording into the next one.
+ *
+ * The next pair is opened here, before the phone is answered. Leaving it to
+ * be reopened later meant nothing was recorded until the 30 s status pass
+ * noticed, and that pass then claimed yet another number, skipping this one.
  */
 static void handle_trip_end(void)
 {
     if (!s_trip_active) {
         ESP_LOGW(TAG, "TRIP_END with no active trip - ignored");
-        if (s_rotate_sem) xSemaphoreGive(s_rotate_sem);
+        marker_done(true);   // as before: nothing to end is not an error
         return;
     }
     s_trip_active = false;
@@ -545,10 +664,18 @@ static void handle_trip_end(void)
         s_file = NULL;
 
         s_log_id = claim_log_id();
+        sd_store_reclaim(s_want_free, s_log_id);
+        if (open_log()) {
+            open_snap();
+        } else {
+            // The status pass keeps retrying under a fresh number.
+            ESP_LOGE(TAG, "Could not open the next session after TRIP_END");
+        }
     }
 
-    // Let the BLE task reply only once the rotation is really done.
-    if (s_rotate_sem) xSemaphoreGive(s_rotate_sem);
+    // Let the BLE task reply only once the rotation is really done. The trip
+    // itself was closed out either way, so this reports success.
+    marker_done(true);
 
     ESP_LOGI(TAG, "Trip ended - %lus, %.2fAh, %.3fkWh, SoC %u%%->%u%%, peak %.1fA",
              (unsigned long)duration_s, ah_used, kwh_used,
@@ -561,17 +688,24 @@ void can_logger_task(void *pvParameters)
 {
     (void)pvParameters;
 
+    can_decode_init();
+
     // Created before the CAN peripheral starts, so no frame can arrive while
-    // the queue handle is still NULL.
-    s_frame_queue = xQueueCreate(FRAME_QUEUE_DEPTH, sizeof(can_frame_t));
+    // the queue handle is still NULL. Internal RAM explicitly: with
+    // SPIRAM_USE_MALLOC a buffer this size would otherwise land in PSRAM.
+    s_frame_queue = xQueueCreateWithCaps(FRAME_QUEUE_DEPTH, sizeof(can_frame_t),
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     configASSERT(s_frame_queue);
 
     // Created before BLE can post to them.
     s_marker_queue = xQueueCreate(4, sizeof(trip_marker_t));
-    s_rotate_sem   = xSemaphoreCreateBinary();
-    configASSERT(s_marker_queue && s_rotate_sem);
+    s_marker_sem   = xSemaphoreCreateBinary();
+    configASSERT(s_marker_queue && s_marker_sem);
 
-    s_filebuf = malloc(FILE_BUF_BYTES);
+    // DMA-capable and cache-line aligned, so FATFS's whole-sector writes can
+    // go straight from this buffer to the SDMMC DMA without a bounce copy.
+    s_filebuf = heap_caps_aligned_alloc(64, FILE_BUF_BYTES,
+                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (!s_filebuf) ESP_LOGW(TAG, "No memory for file buffer - using default");
 
     while (!sd_store_mount()) {
@@ -604,7 +738,7 @@ void can_logger_task(void *pvParameters)
 
         if (attempt == OPEN_RETRY_LIMIT / 2) {
             ESP_LOGW(TAG, "Open still failing - remounting card");
-            sd_store_mount();
+            remount_card();
         }
         vTaskDelay(pdMS_TO_TICKS(OPEN_RETRY_MS));
     }
@@ -635,15 +769,18 @@ void can_logger_task(void *pvParameters)
          * and the ISR starts dropping. Batch the drain instead, and bound the
          * batch so the flush cadence still holds under sustained load.
          */
+        refresh_unix_offset();
+
         int batch = 0;
-        while (batch < FRAME_QUEUE_DEPTH &&
+        while (batch < DRAIN_BATCH_MAX &&
                xQueueReceive(s_frame_queue, &f,
                              batch ? 0 : pdMS_TO_TICKS(100)) == pdTRUE) {
             /*
              * Decode before writing. This task is the single writer of
-             * vehicle_state, which is what lets the UI and BLE read it without
-             * a mutex, and decoding here means the dash sees a value the
-             * instant the frame is logged.
+             * vehicle_state, and decoding here means the dash sees a value the
+             * instant the frame is logged. The lock is taken per frame, never
+             * per batch, so interrupts on this core are masked only for
+             * microseconds at a time.
              */
             raw_can_log_t rf = {
                 .tick_ms = (uint32_t)(f.us / 1000),
@@ -651,7 +788,16 @@ void can_logger_task(void *pvParameters)
                 .dlc     = f.dlc,
             };
             memcpy(rf.data, f.data, sizeof(rf.data));
+            vehicle_state_lock();
             can_decode_frame(&rf);
+            vehicle_state_unlock();
+
+            // Speedo mode streams raw frames to the phone. Non-blocking: the
+            // BLE link cannot carry a busy bus, and the log must never wait
+            // on it.
+            if (g_app_mode == APP_MODE_SPEEDO && g_ble_live_queue) {
+                xQueueSend(g_ble_live_queue, &rf, 0);
+            }
 
             write_frame(&f);
             batch++;
@@ -692,7 +838,7 @@ void can_logger_task(void *pvParameters)
                              (unsigned long)s_commit_fails);
                     if (!reopen_log()) {
                         ESP_LOGE(TAG, "Reopen failed - remounting card");
-                        sd_store_mount();
+                        remount_card();   // both files are closed by now
                     }
                     s_commit_fails = 0;
                 }
@@ -757,9 +903,15 @@ void can_logger_task(void *pvParameters)
              * reopen_log() — the card may have been swapped, and the old number
              * could now collide with a file already on the new card.
              */
-            if (!s_file && reopen_log()) {
-                ESP_LOGW(TAG, "Logging resumed as canlog_%04lu.csv",
-                         (unsigned long)s_log_id);
+            if (!s_file) {
+                if (reopen_log()) {
+                    ESP_LOGW(TAG, "Logging resumed as canlog_%04lu.csv",
+                             (unsigned long)s_log_id);
+                } else {
+                    // Maybe the card was pulled and put back. Pick it up
+                    // now, so the next pass can open a file on it.
+                    remount_card();
+                }
             }
         }
     }

@@ -58,8 +58,12 @@ void app_main(void)
      * somewhere to put them. It hands the TWAI install to a short-lived core-1
      * task, which keeps the RX ISR on core 1 and all the blocking SD I/O here
      * on core 0 alongside LVGL and BLE.
+     *
+     * Priority 7 puts it above the LVGL task (6). It spends nearly all its
+     * time blocked on the frame queue, so it costs the UI almost nothing, but
+     * a long render can no longer hold off the drain and overflow the queue.
      */
-    xTaskCreatePinnedToCore(can_logger_task, "canlog", 6144, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(can_logger_task, "canlog", 6144, NULL, 7, NULL, 0);
 
     /*
      * BLE. The P4 has no radio of its own: NimBLE runs here as a host-only
