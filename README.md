@@ -130,10 +130,22 @@ Both live in `main/Kconfig.projbuild` and are one line each:
 `DASH_SIMULATE_CAN` feeds synthetic frames through the normal decode path so the
 dash can be exercised on the bench. Never enable it on the tractor.
 
-## Logo
+## Logos
 
-The dash reserves a 200x100 slot at the top left. Replace `main/assets/logo.png`
-with the real logo at that size and rebuild; nothing else needs to change.
+Two PNGs are embedded, both decoded at runtime:
+
+| File | Where it shows | Size |
+|---|---|---|
+| `main/assets/splash_logo.png` | Centered on the boot splash | 420x251 |
+| `main/assets/dash_logo.png` | Top-left slot of the dash's top bar | 200x100 |
+
+To change either one, replace the file and rebuild. The image descriptors use
+fixed dimensions, so a new logo must be the same size as the old one. If it is
+not, update `SPLASH_LOGO_W`/`SPLASH_LOGO_H` in `main/ui/ui_splash.c` or the
+width and height set on `s_logo` in `main/ui/ui_dash.c`.
+
+The splash logo is deliberately small. A full-screen splash bitmap made every
+frame of the fade blend all 1024x600 pixels, and the fade stuttered.
 
 ## Log files
 

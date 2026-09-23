@@ -30,4 +30,45 @@ menu "Tractor Dash"
         help
             Logs are always UTC. This only affects the clock on the dash.
 
+    config DASH_LATITUDE
+        string "Latitude for sunrise/sunset (decimal degrees, + = N)"
+        default "51.05"
+        help
+            Used only to compute local sunrise/sunset for the auto-brightness
+            fade. Somerset, UK by default. Does not need to be exact — a few
+            miles of error shifts sunrise/sunset by well under a minute.
+
+    config DASH_LONGITUDE
+        string "Longitude for sunrise/sunset (decimal degrees, + = E)"
+        default "-2.85"
+        help
+            Paired with DASH_LATITUDE. Negative values are west, matching
+            Somerset's position west of the Greenwich meridian.
+
+    config DASH_BRIGHTNESS_DAY_PCT
+        int "Daytime backlight brightness (%)"
+        range 1 100
+        default 100
+        help
+            Backlight level while the sun is up, and the fallback level
+            whenever the clock has not been set yet (RTC absent or unset).
+
+    config DASH_BRIGHTNESS_NIGHT_PCT
+        int "Night-time backlight brightness (%)"
+        range 1 100
+        default 40
+        help
+            Backlight level once fully dark. Kept well above 0 so the dash
+            stays legible at night, just dimmer than the daytime glare level.
+
+    config DASH_BRIGHTNESS_FADE_MINUTES
+        int "Sunrise/sunset fade half-width (minutes)"
+        range 5 120
+        default 30
+        help
+            The backlight fades linearly between day and night brightness
+            over a window of this many minutes on each side of the actual
+            sunrise/sunset instant (60 minutes total by default), rather than
+            switching instantly.
+
 endmenu

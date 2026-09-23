@@ -27,8 +27,8 @@
 #define STALE_MS      2000   // no frame for this long -> every value shows "--"
 #define REFRESH_MS    100
 
-extern const uint8_t logo_start[] asm("_binary_logo_png_start");
-extern const uint8_t logo_end[]   asm("_binary_logo_png_end");
+extern const uint8_t dash_logo_start[] asm("_binary_dash_logo_png_start");
+extern const uint8_t dash_logo_end[]   asm("_binary_dash_logo_png_end");
 static lv_image_dsc_t s_logo;
 
 // ── Widgets kept for updating ────────────────────────────────────────────────
@@ -179,7 +179,9 @@ static void refresh_cb(lv_timer_t *t)
         snprintf(buf, sizeof(buf), "%d", r->motor_rpm);
         set_text_if_changed(s_rpm, buf);
 
-        snprintf(buf, sizeof(buf), "%.1f", s.speed_mph_x10 / 10.0f);
+        int mph_round = (s.speed_mph_x10 >= 0) ? (s.speed_mph_x10 + 5) / 10
+                                                : -((-s.speed_mph_x10 + 5) / 10);
+        snprintf(buf, sizeof(buf), "%d", mph_round);
         set_text_if_changed(s_mph, buf);
 
         snprintf(buf, sizeof(buf), "%.1f", s.power_w / 1000.0f);
@@ -277,8 +279,8 @@ lv_obj_t *ui_dash_create(void)
     s_logo.header.cf = LV_COLOR_FORMAT_RAW;
     s_logo.header.w  = 200;
     s_logo.header.h  = 100;
-    s_logo.data      = logo_start;
-    s_logo.data_size = (uint32_t)(logo_end - logo_start);
+    s_logo.data      = dash_logo_start;
+    s_logo.data_size = (uint32_t)(dash_logo_end - dash_logo_start);
 
     lv_obj_t *img = lv_image_create(top);
     lv_image_set_src(img, &s_logo);
@@ -302,16 +304,19 @@ lv_obj_t *ui_dash_create(void)
     lv_obj_align(s_date, LV_ALIGN_RIGHT_MID, -16, 22);
 
     // ── Main row ────────────────────────────────────────────────────────────
-    s_rpm = make_big(scr, 0,   341, "RPM");
-    s_mph = make_big(scr, 341, 342, "MPH");
-    s_kw  = make_big(scr, 683, 341, "kW");
+    // RPM needs room for 4 digits, MPH is now a rounded whole number capped
+    // at 25 (2 digits), and kW can show "-50.0" (5 chars) so it gets the most
+    // room of the two smaller columns.
+    s_rpm = make_big(scr, 0,   400, "RPM");
+    s_mph = make_big(scr, 400, 254, "MPH");
+    s_kw  = make_big(scr, 654, 370, "kW");
 
     // ── Bottom grid ─────────────────────────────────────────────────────────
-    make_cell(scr, C_SOC,   "SOC",        0, 0);
-    make_cell(scr, C_PACKV, "PACK V",     1, 0);
+    make_cell(scr, C_BATT,  "BATT \xC2\xB0""C",  0, 0);
+    make_cell(scr, C_MOTOR, "MOTOR \xC2\xB0""C", 1, 0);
     make_cell(scr, C_AMPS,  "AMPS",       2, 0);
-    make_cell(scr, C_BATT,  "BATT \xC2\xB0""C",  3, 0);
-    make_cell(scr, C_MOTOR, "MOTOR \xC2\xB0""C", 4, 0);
+    make_cell(scr, C_SOC,   "SOC",        3, 0);
+    make_cell(scr, C_PACKV, "PACK V",     4, 0);
     make_cell(scr, C_INV,   "INV \xC2\xB0""C",   0, 1);
     make_cell(scr, C_CHG,   "CHG \xC2\xB0""C",   1, 1);
     make_cell(scr, C_12V,   "12V",        2, 1);

@@ -47,4 +47,14 @@ end.
 - Never run `idf.py monitor` — it does not return. Use `tools/capture_log.ps1`.
 - Never patch anything under `managed_components/`. Work around component bugs
   from the top-level `CMakeLists.txt` instead.
+  - Exception: `waveshare__esp32_p4_wifi6_touch_lcd_7b/esp32_p4_wifi6_touch_lcd_7b.c`
+    hardcodes the LVGL draw buffer to `buffer_height = 50`, `use_psram = false`,
+    `enable_ppa_accel = false` inside `bsp_display_lcd_init()`, with no field on
+    `bsp_display_cfg_t` and no Kconfig symbol to reach it from the top level.
+    That 1024x50 SRAM buffer forced every full-screen LVGL animation (e.g. the
+    splash fade) into ~12 partial-buffer passes per frame and made them stutter.
+    Patched in place to `buffer_height = BSP_LCD_V_RES`, `use_psram = true`,
+    `enable_ppa_accel = true`, approved explicitly by the user as a deliberate,
+    one-off exception to this rule. If this component is ever updated from
+    upstream, reapply the same three field changes.
 - CAN is listen-only. This firmware must never transmit on the tractor bus.

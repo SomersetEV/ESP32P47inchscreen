@@ -2,7 +2,6 @@
 
 #if CONFIG_DASH_SIMULATE_CAN
 
-#include <math.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -16,9 +15,22 @@
  * can_decode_frame(), the same entry point the real bus uses, so what is
  * exercised here is the real decode and display path — not a parallel one.
  *
- * Values sweep on a slow sine so every widget visibly changes, including the
- * colour thresholds and the regen (negative kW) case.
+ * Currently pinned to a fixed scenario (constant RPM/speed/power, everything
+ * else static) rather than the usual sine sweep — see the constants below.
+ * Speed is NOT set directly: it is derived from RPM by the same
+ * DASH_MPH_PER_RPM ratio the real bus decode uses, so it follows RPM rather
+ * than being an independent knob.
  */
+
+// 2200 rpm constant. 0x1DA carries raw = rpm * 2.
+#define SIM_MOTOR_RPM     2200
+// 15 kW constant, built from a fixed pack voltage/current pair whose product
+// is 15000 W (power_w = pack_voltage_mv * pack_current_ma / 1e6).
+#define SIM_PACK_VOLTAGE_MV     360000  // 360 V
+// can_decode does pack_current_ma = raw_isa_current * 1000 / DASH_CURRENT_DIVISOR
+// (default divisor 100, so raw is in centiamps: pack_current_ma = raw * 10).
+// raw = 4167 -> 41.67 A -> 360 V * 41.67 A = 15.0 kW.
+#define SIM_PACK_CURRENT_RAW      4167
 
 static const char *TAG = "SIM";
 static esp_timer_handle_t s_timer;
@@ -45,66 +57,62 @@ static void emit(uint32_t id, const uint8_t *data, uint8_t dlc)
 static void sim_cb(void *arg)
 {
     (void)arg;
-    static float phase = 0.0f;
-    phase += 0.02f;
-
-    const float s = sinf(phase);              // -1 .. 1
-    const float u = (s + 1.0f) * 0.5f;        //  0 .. 1
 
     uint8_t d[8] = {0};
 
-    // 0x1DA — motor RPM, swings through zero so speed and regen both show.
-    int16_t rpm = (int16_t)(s * 3000.0f);
-    int16_t raw_rpm = rpm * 2;
+    // 0x1DA — motor RPM, held at SIM_MOTOR_RPM. Speed on screen follows from
+    // this via DASH_MPH_PER_RPM, it is not set separately.
+    int16_t raw_rpm = (int16_t)(SIM_MOTOR_RPM * 2);
     d[4] = (uint8_t)((raw_rpm >> 8) & 0xff);
     d[5] = (uint8_t)(raw_rpm & 0xff);
     emit(0x1DA, d, 8);
 
-    // 0x55A — motor / inverter temperature in °F, sweeping past the amber and
-    // red thresholds (60 / 80 °C).
+    // 0x55A — motor / inverter temperature in °F. Held mid-range, well clear
+    // of the amber/red thresholds (60/80 °C).
     memset(d, 0, sizeof(d));
-    d[1] = (uint8_t)(100 + u * 100);          // motor
-    d[2] = (uint8_t)(90  + u * 100);          // inverter
+    d[1] = 100;                               // motor
+    d[2] = 90;                                // inverter
     emit(0x55A, d, 8);
 
-    // 0x355 — SOC, dips below the 15 % alert threshold.
+    // 0x355 — SOC, held at 50 %.
     memset(d, 0, sizeof(d));
-    d[0] = (uint8_t)(u * 100.0f);
+    d[0] = 50;
     emit(0x355, d, 8);
 
-    // 0x356 — pack temperature, 0.1 °C units in bytes 4-5.
+    // 0x356 — pack temperature, 0.1 °C units in bytes 4-5. Held at 25.0 °C.
     memset(d, 0, sizeof(d));
-    int16_t bt = (int16_t)(200 + u * 700);
+    int16_t bt = 250;
     d[4] = (uint8_t)(bt & 0xff);
     d[5] = (uint8_t)((bt >> 8) & 0xff);
     emit(0x356, d, 8);
 
-    // 0x373 — cell min / max in mV.
+    // 0x373 — cell min / max in mV. Held at a plausible mid-charge pair.
     memset(d, 0, sizeof(d));
-    uint16_t cmin = (uint16_t)(3600 + u * 100);
-    uint16_t cmax = cmin + (uint16_t)(20 + u * 60);
+    uint16_t cmin = 3650;
+    uint16_t cmax = 3680;
     d[0] = cmin & 0xff; d[1] = cmin >> 8;
     d[2] = cmax & 0xff; d[3] = cmax >> 8;
     emit(0x373, d, 8);
 
     // 0x522 — pack voltage, mV. Decoded before current so kW is consistent.
     memset(d, 0, sizeof(d));
-    put_isa(d, (int32_t)(350000 + u * 20000));
+    put_isa(d, SIM_PACK_VOLTAGE_MV);
     emit(0x522, d, 8);
 
-    // 0x521 — pack current. Sign follows RPM so braking shows regen green.
+    // 0x521 — pack current. can_decode negates this on the way in, so send
+    // the negated value here to land on +SIM_PACK_CURRENT_RAW (discharge).
     memset(d, 0, sizeof(d));
-    put_isa(d, (int32_t)(-s * 15000.0f));
+    put_isa(d, -SIM_PACK_CURRENT_RAW);
     emit(0x521, d, 8);
 
-    // 0x33B — charger temperature (raw - 40).
+    // 0x33B — charger temperature (raw - 40). Held at 20.0 °C.
     memset(d, 0, sizeof(d));
-    d[3] = (uint8_t)(60 + u * 60);
+    d[3] = 60;
     emit(0x33B, d, 8);
 
-    // 0x39F — aux 12 V rail (raw / 8).
+    // 0x39F — aux 12 V rail (raw / 8). Held at ~13.5 V.
     memset(d, 0, sizeof(d));
-    d[1] = (uint8_t)(104 + u * 8);            // ~13 - 14 V
+    d[1] = 108;
     emit(0x39F, d, 8);
 }
 
