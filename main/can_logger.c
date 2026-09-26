@@ -54,6 +54,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static const char *TAG = "CANLOG";
@@ -214,10 +215,27 @@ void can_logger_submit(const can_frame_t *f)
 
 // ── NVS: the per-power-cycle file counter ─────────────────────────────────────
 
+static bool session_files_exist(uint32_t id)
+{
+    char path[64];
+    struct stat st;
+
+    snprintf(path, sizeof(path), MOUNT_POINT "/canlog_%04lu.csv", (unsigned long)id);
+    if (stat(path, &st) == 0) return true;
+    snprintf(path, sizeof(path), MOUNT_POINT "/snap_%04lu.csv", (unsigned long)id);
+    return stat(path, &st) == 0;
+}
+
 /*
  * Claim the next log number. The increment is committed before the caller
  * opens the file, so an unexpected power cut can never hand the next boot a
  * number that is already in use.
+ *
+ * NVS alone is not enough, because the files are opened with "w". A counter
+ * that restarts — a new board, an erased or reinitialised NVS partition, or
+ * the wrap from 9999 — would truncate the sessions already on the card under
+ * the same names, including ones the phone has not fetched yet. Numbers still
+ * in use on the card are skipped instead.
  */
 static uint32_t claim_log_id(void)
 {
@@ -231,6 +249,11 @@ static uint32_t claim_log_id(void)
 
     nvs_get_u32(nvs, NVS_KEY_CANLOG_ID, &id);
     if (id == 0) id = 1;
+
+    // Bounded, so a card holding every number cannot stall the logger.
+    for (uint32_t tries = 1; tries < 9999 && session_files_exist(id); tries++) {
+        id = (id >= 9999) ? 1 : id + 1;
+    }
 
     // Wrap well before the %04lu field would overflow into a 5th digit.
     uint32_t next = (id >= 9999) ? 1 : id + 1;
@@ -398,6 +421,14 @@ static void write_snapshot(uint32_t tick_ms)
     // it is fsync'd in commit() rather than flushed on a counter here.
 }
 
+// Marker rows keep each file's own column count so both still parse.
+static void write_trip_start_rows(void)
+{
+    if (s_file) fprintf(s_file, "TRIP_START,,,,,,\n");
+    if (s_snap) fprintf(s_snap, "TRIP_START,,,,,,,,,,,,,,,\n");
+    commit();
+}
+
 /*
  * The current file has stopped accepting writes. Abandon it and start a new one
  * under a fresh number: the card may still be usable (a bad sector, a transient
@@ -422,6 +453,14 @@ static bool reopen_log(void)
 
     if (!open_log()) return false;
     open_snap();
+
+    /*
+     * A trip that was running carries on into the new files. Without its own
+     * TRIP_START the phone sees the old file's trip end at the cut, and every
+     * row after it lands outside any job; the eventual TRIP_END then has no
+     * start to pair with and is discarded.
+     */
+    if (s_trip_active) write_trip_start_rows();
 
     s_reopens++;
     // Drops are counted per-file; the old file's tally went with it.
@@ -573,6 +612,19 @@ static void note_drops(void)
 
 static void handle_trip_start(void)
 {
+    /*
+     * The phone can lose track of a running trip: its STATUS query after a
+     * reconnect or a sync can time out, and it then shows the job as stopped.
+     * Restarting here would reset the trip's figures and write a second
+     * TRIP_START, and the phone's parser drops every row before the last one
+     * from the job. Keep the trip running and confirm it instead.
+     */
+    if (s_trip_active) {
+        ESP_LOGW(TAG, "TRIP_START with a trip already running - kept it");
+        marker_done(true);
+        return;
+    }
+
     // Normally the pair is already open. If it is not (no card, or the last
     // rotation could not open the next file), try once more now.
     if (!s_file && !open_log()) {
@@ -595,10 +647,7 @@ static void handle_trip_start(void)
     s_trip_peak_bms_c   = 0;
     s_trip_active       = true;
 
-    // Marker rows keep each file's own column count so both still parse.
-    fprintf(s_file, "TRIP_START,,,,,,\n");
-    if (s_snap) fprintf(s_snap, "TRIP_START,,,,,,,,,,,,,,,\n");
-    commit();
+    write_trip_start_rows();
 
     marker_done(true);
     ESP_LOGI(TAG, "Trip started - soc=%u%%", s_trip_start_soc);
