@@ -52,6 +52,8 @@ static const char *TAG        = "BLE";
 #define NVS_KEY_LAST_SYNCED     "last_synced"
 #define CMD_QUEUE_DEPTH         8
 #define CMD_MAX_LEN             32
+// Candidates LIST considers; more than one 512-byte reply can carry.
+#define LIST_MAX_SESSIONS       64
 
 // ── BLE chunk sizing ─────────────────────────────────────────────────────────
 // Default 20 bytes (MTU 23) until Android negotiates MTU up on connect
@@ -95,25 +97,63 @@ typedef struct {
 
 // ── Notification helper ──────────────────────────────────────────────────────
 
+// How long a notification may wait for a free mbuf before it counts as failed.
+#define NOTIFY_RETRY_MS         10
+#define NOTIFY_RETRY_LIMIT      200     // 2 s in all
+
+/*
+ * Out of mbufs is not a failure, only back-pressure: the pool refills as the
+ * controller gets packets onto the air. Treating it as fatal aborted a GET part
+ * way with neither END nor ERR, and the phone could only find out by timing out.
+ */
 static int nus_notify(const void *data, uint16_t len)
 {
-    if (conn_handle == BLE_HS_CONN_HANDLE_NONE) return -1;
+    for (int attempt = 0; ; attempt++) {
+        if (conn_handle == BLE_HS_CONN_HANDLE_NONE) return -1;
 
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
-    if (!om) {
-        ESP_LOGE(TAG, "mbuf alloc failed");
-        return -1;
+        // ble_gatts_notify_custom() consumes the mbuf even when it fails, so
+        // every attempt builds a fresh one.
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
+        int rc = om ? ble_gatts_notify_custom(conn_handle, nus_tx_handle, om)
+                    : BLE_HS_ENOMEM;
+        if (rc == 0) return 0;
+
+        if (rc != BLE_HS_ENOMEM || attempt >= NOTIFY_RETRY_LIMIT) {
+            ESP_LOGW(TAG, "notify failed: %d", rc);
+            return rc;
+        }
+        vTaskDelay(pdMS_TO_TICKS(NOTIFY_RETRY_MS));
     }
-    int rc = ble_gatts_notify_custom(conn_handle, nus_tx_handle, om);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "notify failed: %d", rc);
-    }
-    return rc;
 }
 
+// Payload bytes one notification can carry on the current link.
+static uint16_t notify_chunk_size(void)
+{
+    uint16_t chunk = (negotiated_mtu > 3) ? (negotiated_mtu - 3) : DEFAULT_CHUNK_SIZE;
+    return (chunk > MAX_CHUNK_SIZE) ? MAX_CHUNK_SIZE : chunk;
+}
+
+/*
+ * NimBLE silently cuts a notification down to MTU - 3 bytes
+ * (ble_att_truncate_to_mtu), so a long reply sent whole lost its tail and,
+ * with it, the '\n' the phone waits for. The default ATT MTU here is 256 and
+ * iOS offers 185, so a LIST of more than ~20 sessions never arrived intact and
+ * sync failed on every connect from then on. Split it instead; the phone
+ * reassembles lines across notifications.
+ */
 static int nus_notify_str(const char *str)
 {
-    return nus_notify(str, (uint16_t)strlen(str));
+    size_t   len   = strlen(str);
+    uint16_t chunk = notify_chunk_size();
+
+    while (len > 0) {
+        uint16_t n = (len > chunk) ? chunk : (uint16_t)len;
+        int rc = nus_notify(str, n);
+        if (rc != 0) return rc;
+        str += n;
+        len -= n;
+    }
+    return 0;
 }
 
 // ── Command handlers ─────────────────────────────────────────────────────────
@@ -123,20 +163,25 @@ static void handle_list_command(void)
     /*
      * Enumerate completed session files on SD card.
      * The currently-open session (still being written) is excluded.
-     * Its ID = (NVS "session_id" - 1) since sd_logger increments on boot.
      *
      * Response: "LIST 0001,3600;0002,1800;\n"
      * Record count is approximate (file_size / 100 bytes per CSV row).
+     *
+     * Sessions are listed lowest id first, and only the lowest ones when they
+     * do not all fit. DONE advances a high-water mark, so the phone must fetch
+     * them in ascending order: in readdir order, a DONE for a higher id hid
+     * every lower one it had not fetched yet — including any that did not fit
+     * in the reply — and those sessions never reached the phone.
      */
-    uint32_t current_session = 0;
-    uint32_t last_synced     = 0;
+    uint32_t last_synced = 0;
     nvs_handle_t nvs;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
-        nvs_get_u32(nvs, "session_id",       &current_session);
         nvs_get_u32(nvs, NVS_KEY_LAST_SYNCED, &last_synced);
         nvs_close(nvs);
     }
-    uint32_t active_session = current_session > 0 ? current_session - 1 : 0;
+    // Straight from the logger rather than NVS "session_id" - 1, which named
+    // the wrong session once the counter wrapped from 9999 to 1.
+    uint32_t active_session = can_logger_session_id();
 
     DIR *dir = opendir(MOUNT_POINT);
     if (!dir) {
@@ -144,7 +189,9 @@ static void handle_list_command(void)
         return;
     }
 
-    char response[512] = "LIST ";
+    // The lowest LIST_MAX_SESSIONS unsynced ids, kept sorted ascending.
+    uint32_t ids[LIST_MAX_SESSIONS];
+    size_t   n_ids = 0;
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         uint32_t sid;
@@ -152,23 +199,34 @@ static void handle_list_command(void)
         if (sid == active_session) continue;    // skip currently-open session
         if (sid <= last_synced)    continue;    // skip already-synced sessions
 
-        char path[280];
-        snprintf(path, sizeof(path), MOUNT_POINT "/%s", entry->d_name);
+        size_t pos = n_ids;
+        while (pos > 0 && ids[pos - 1] > sid) pos--;
+        if (pos >= LIST_MAX_SESSIONS) continue;  // higher than every kept id
+        if (n_ids < LIST_MAX_SESSIONS) n_ids++;  // else the highest drops off
+        memmove(&ids[pos + 1], &ids[pos], (n_ids - 1 - pos) * sizeof(ids[0]));
+        ids[pos] = sid;
+    }
+    closedir(dir);
+
+    char response[512] = "LIST ";
+    for (size_t i = 0; i < n_ids; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), MOUNT_POINT "/snap_%04lu.csv", ids[i]);
         struct stat st;
         if (stat(path, &st) != 0 || st.st_size == 0) continue;  // skip empty/unreadable files
         uint32_t records = (uint32_t)(st.st_size / 100);
 
         char entry_str[32];
-        int entry_len = snprintf(entry_str, sizeof(entry_str), "%04lu,%lu;", sid, records);
+        int entry_len = snprintf(entry_str, sizeof(entry_str), "%04lu,%lu;", ids[i], records);
         if (entry_len <= 0) continue;
-        // Reserve 2 bytes for the trailing "\n\0"; skip entry if it won't fit whole
+        // Reserve 2 bytes for the trailing "\n\0"; stop at the first entry that
+        // won't fit whole, so the ids sent stay the lowest ones.
         size_t used = strlen(response);
         if (used + (size_t)entry_len + 2 > sizeof(response)) break;
         // memcpy rather than strncat: the bound is already checked above, and
         // GCC 15 cannot see that through strncat's length argument.
         memcpy(response + used, entry_str, (size_t)entry_len + 1);
     }
-    closedir(dir);
     size_t used = strlen(response);
     if (used + 2 <= sizeof(response)) {
         response[used]     = '\n';
@@ -219,12 +277,12 @@ static void handle_get_command(uint32_t session_id)
     }
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    uint16_t chunk_size = (negotiated_mtu > 3) ? (negotiated_mtu - 3) : DEFAULT_CHUNK_SIZE;
-    if (chunk_size > MAX_CHUNK_SIZE) chunk_size = MAX_CHUNK_SIZE;
+    uint16_t chunk_size = notify_chunk_size();
 
     uint8_t  buf[MAX_CHUNK_SIZE];
     size_t   bytes_read;
     uint32_t total_sent = 0;
+    uint8_t  last_byte  = '\n';
 
     while ((bytes_read = fread(buf, 1, chunk_size, f)) > 0) {
         if (conn_handle == BLE_HS_CONN_HANDLE_NONE) {
@@ -238,9 +296,19 @@ static void handle_get_command(uint32_t session_id)
             return;
         }
         total_sent += bytes_read;
+        last_byte   = buf[bytes_read - 1];
         vTaskDelay(pdMS_TO_TICKS(20));
     }
     fclose(f);
+
+    /*
+     * The phone finds the end of the file by a line starting "END". A file
+     * whose last row is unterminated (a write cut short by power loss, or a
+     * card fault) would glue END onto that row, the phone would never see it,
+     * and the session would fail by timeout on every sync. An empty line is
+     * skipped by the phone, so terminating here is always safe.
+     */
+    if (last_byte != '\n') nus_notify_str("\n");
 
     char end_marker[32];
     snprintf(end_marker, sizeof(end_marker), "END %04lu\n", session_id);
@@ -311,8 +379,16 @@ static void handle_trip_marker(trip_marker_t type)
      * the marker really reached a log file; with no card there is nothing to
      * start, and replying OK would tell the phone a trip is recording.
      */
+    /*
+     * TRIP_END can take a while: it clears the saved trip, fsyncs and closes
+     * both files, claims a number and may reclaim space before opening the
+     * next pair. Replying early made the phone sync before the finished
+     * session was listable. Each limit sits inside the phone's own wait for
+     * the reply (5 s for TRIP_START, 10 s for TRIP_END).
+     */
+    const uint32_t wait_ms = (type == TRIP_MARKER_END) ? 8000 : 4000;
     bool ok = false;
-    if (!can_logger_wait_marker(2000, &ok)) {
+    if (!can_logger_wait_marker(wait_ms, &ok)) {
         ESP_LOGW(TAG, "Logger did not handle the trip marker in time");
     } else if (!ok) {
         nus_notify_str("ERR no_log\n");
@@ -672,6 +748,9 @@ void ble_nus_task(void *pvParameters)
                 raw_can_log_t frame;
                 char buf[512];
                 int buf_len = 0;
+                // A notification carries at most one chunk; more is cut off.
+                int buf_cap = notify_chunk_size();
+                if (buf_cap > (int)sizeof(buf)) buf_cap = (int)sizeof(buf);
                 bool disconnected = false;
                 while (!disconnected &&
                        xQueueReceive(g_ble_live_queue, &frame, 0) == pdTRUE) {
@@ -684,7 +763,7 @@ void ble_nus_task(void *pvParameters)
                         frame.data[0], frame.data[1], frame.data[2], frame.data[3],
                         frame.data[4], frame.data[5], frame.data[6], frame.data[7]);
                     if (line_len <= 0 || line_len >= (int)sizeof(line)) continue;
-                    if (buf_len + line_len > (int)sizeof(buf)) {
+                    if (buf_len > 0 && buf_len + line_len > buf_cap) {
                         if (nus_notify(buf, (uint16_t)buf_len) != 0) {
                             disconnected = true;
                             break;

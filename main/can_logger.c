@@ -54,6 +54,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static const char *TAG = "CANLOG";
@@ -144,6 +145,39 @@ static int16_t  s_trip_peak_motor_c;
 static int16_t  s_trip_peak_inv_c;
 static int16_t  s_trip_peak_bms_c;
 
+/*
+ * A trip outlives a power cut. There is no shutdown, so a key-off mid-job is
+ * not the end of the job: the trip is kept in NVS from TRIP_START until
+ * TRIP_END and resumed on every boot in between, so STATUS keeps reporting it
+ * and the new session carries on with its own TRIP_START row.
+ *
+ * The record holds what the TRIP_END summary needs from earlier power-ups.
+ * It is rewritten once a minute while a trip runs, so a cut costs at most a
+ * minute of the Ah / kWh / running-time totals, never the trip itself.
+ */
+#define NVS_KEY_TRIP           "trip"
+#define TRIP_REC_VERSION       1
+#define TRIP_SAVE_INTERVAL_MS  60000
+
+typedef struct {
+    uint8_t  version;
+    uint8_t  start_soc;
+    uint8_t  pad[2];
+    uint32_t start_unix;    // 0 until the clock is known
+    uint32_t run_s;         // running time from earlier power-ups
+    int32_t  ah_as;         // As used in earlier power-ups
+    int32_t  kwh_wh;        // Wh used in earlier power-ups
+    int32_t  peak_current;  // whole-trip peaks from here down
+    int16_t  peak_rpm;
+    int16_t  peak_motor_c;
+    int16_t  peak_inv_c;
+    int16_t  peak_bms_c;
+} trip_rec_t;
+
+static trip_rec_t s_trip_carry;        // totals carried from earlier power-ups
+static bool       s_trip_baseline_ok;  // s_trip_start_ah/kwh are this power-up's
+static uint8_t    s_trip_fresh_snaps;  // snapshots with live CAN, for the baseline
+
 uint32_t can_logger_session_id(void) { return s_log_id; }
 bool     can_logger_trip_active(void) { return s_trip_active; }
 bool     can_logger_is_logging(void)  { return s_file != NULL; }
@@ -214,10 +248,27 @@ void can_logger_submit(const can_frame_t *f)
 
 // ── NVS: the per-power-cycle file counter ─────────────────────────────────────
 
+static bool session_files_exist(uint32_t id)
+{
+    char path[64];
+    struct stat st;
+
+    snprintf(path, sizeof(path), MOUNT_POINT "/canlog_%04lu.csv", (unsigned long)id);
+    if (stat(path, &st) == 0) return true;
+    snprintf(path, sizeof(path), MOUNT_POINT "/snap_%04lu.csv", (unsigned long)id);
+    return stat(path, &st) == 0;
+}
+
 /*
  * Claim the next log number. The increment is committed before the caller
  * opens the file, so an unexpected power cut can never hand the next boot a
  * number that is already in use.
+ *
+ * NVS alone is not enough, because the files are opened with "w". A counter
+ * that restarts — a new board, an erased or reinitialised NVS partition, or
+ * the wrap from 9999 — would truncate the sessions already on the card under
+ * the same names, including ones the phone has not fetched yet. Numbers still
+ * in use on the card are skipped instead.
  */
 static uint32_t claim_log_id(void)
 {
@@ -231,6 +282,11 @@ static uint32_t claim_log_id(void)
 
     nvs_get_u32(nvs, NVS_KEY_CANLOG_ID, &id);
     if (id == 0) id = 1;
+
+    // Bounded, so a card holding every number cannot stall the logger.
+    for (uint32_t tries = 1; tries < 9999 && session_files_exist(id); tries++) {
+        id = (id >= 9999) ? 1 : id + 1;
+    }
 
     // Wrap well before the %04lu field would overflow into a 5th digit.
     uint32_t next = (id >= 9999) ? 1 : id + 1;
@@ -372,6 +428,21 @@ static void write_snapshot(uint32_t tick_ms)
         if (r->motor_temp   > s_trip_peak_motor_c) s_trip_peak_motor_c = r->motor_temp;
         if (r->inverter_temp > s_trip_peak_inv_c)  s_trip_peak_inv_c   = r->inverter_temp;
         if (r->bms_temp_max > s_trip_peak_bms_c)   s_trip_peak_bms_c   = r->bms_temp_max;
+
+        /*
+         * A trip resumed at boot needs this power-up's ISA baseline, and before
+         * the first frames vehicle_state holds zeros. Take it once CAN has been
+         * live for two snapshots, so the counters have arrived.
+         */
+        if (!s_trip_baseline_ok) {
+            if (!vehicle_state_is_fresh(2000)) {
+                s_trip_fresh_snaps = 0;
+            } else if (++s_trip_fresh_snaps >= 2) {
+                s_trip_start_ah    = r->isa_ah;
+                s_trip_start_kwh   = r->isa_kwh;
+                s_trip_baseline_ok = true;
+            }
+        }
     }
 
     time_t now = rtc_time_valid() ? time(NULL) : 0;
@@ -398,6 +469,14 @@ static void write_snapshot(uint32_t tick_ms)
     // it is fsync'd in commit() rather than flushed on a counter here.
 }
 
+// Marker rows keep each file's own column count so both still parse.
+static void write_trip_start_rows(void)
+{
+    if (s_file) fprintf(s_file, "TRIP_START,,,,,,\n");
+    if (s_snap) fprintf(s_snap, "TRIP_START,,,,,,,,,,,,,,,\n");
+    commit();
+}
+
 /*
  * The current file has stopped accepting writes. Abandon it and start a new one
  * under a fresh number: the card may still be usable (a bad sector, a transient
@@ -422,6 +501,14 @@ static bool reopen_log(void)
 
     if (!open_log()) return false;
     open_snap();
+
+    /*
+     * A trip that was running carries on into the new files. Without its own
+     * TRIP_START the phone sees the old file's trip end at the cut, and every
+     * row after it lands outside any job; the eventual TRIP_END then has no
+     * start to pair with and is discarded.
+     */
+    if (s_trip_active) write_trip_start_rows();
 
     s_reopens++;
     // Drops are counted per-file; the old file's tally went with it.
@@ -571,8 +658,111 @@ static void note_drops(void)
 
 // ── Trip markers ──────────────────────────────────────────────────────────────
 
+// Whole-trip totals: what earlier power-ups carried plus this one's share.
+static void trip_totals(const log_record_t *r,
+                        uint32_t *run_s, int32_t *ah_as, int32_t *kwh_wh)
+{
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+
+    *run_s  = s_trip_carry.run_s + (now_ms - s_trip_start_tick) / 1000;
+    *ah_as  = s_trip_carry.ah_as;
+    *kwh_wh = s_trip_carry.kwh_wh;
+    if (s_trip_baseline_ok) {
+        *ah_as  += r->isa_ah  - s_trip_start_ah;
+        *kwh_wh += r->isa_kwh - s_trip_start_kwh;
+    }
+}
+
+static void trip_save(void)
+{
+    vehicle_state_t st;
+    vehicle_state_snapshot(&st);
+
+    trip_rec_t rec = s_trip_carry;
+    trip_totals(&st.latest, &rec.run_s, &rec.ah_as, &rec.kwh_wh);
+
+    // Started with the clock unset; the phone's TIME has set it since.
+    if (rec.start_unix == 0 && rtc_time_valid()) {
+        rec.start_unix = (uint32_t)(time(NULL) - (time_t)rec.run_s);
+        s_trip_carry.start_unix = rec.start_unix;
+    }
+
+    rec.peak_current = s_trip_peak_current;
+    rec.peak_rpm     = s_trip_peak_rpm;
+    rec.peak_motor_c = s_trip_peak_motor_c;
+    rec.peak_inv_c   = s_trip_peak_inv_c;
+    rec.peak_bms_c   = s_trip_peak_bms_c;
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(nvs, NVS_KEY_TRIP, &rec, sizeof(rec));
+        if (err == ESP_OK) err = nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not save the trip (%s) - a power cut would end it",
+                 esp_err_to_name(err));
+    }
+}
+
+static void trip_forget(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not clear the saved trip - the next boot resumes it");
+        return;
+    }
+    nvs_erase_key(nvs, NVS_KEY_TRIP);
+    nvs_commit(nvs);
+    nvs_close(nvs);
+}
+
+// At boot: pick up a trip the last power-up never ended.
+static void trip_resume(void)
+{
+    trip_rec_t   rec;
+    size_t       len = sizeof(rec);
+    nvs_handle_t nvs;
+
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) return;
+    esp_err_t err = nvs_get_blob(nvs, NVS_KEY_TRIP, &rec, &len);
+    nvs_close(nvs);
+    if (err != ESP_OK || len != sizeof(rec) || rec.version != TRIP_REC_VERSION) {
+        return;
+    }
+
+    s_trip_carry        = rec;
+    s_trip_start_soc    = rec.start_soc;
+    s_trip_start_tick   = (uint32_t)(esp_timer_get_time() / 1000);
+    s_trip_peak_current = rec.peak_current;
+    s_trip_peak_rpm     = rec.peak_rpm;
+    s_trip_peak_motor_c = rec.peak_motor_c;
+    s_trip_peak_inv_c   = rec.peak_inv_c;
+    s_trip_peak_bms_c   = rec.peak_bms_c;
+    s_trip_baseline_ok  = false;
+    s_trip_fresh_snaps  = 0;
+    s_trip_active       = true;
+
+    ESP_LOGW(TAG, "Resuming the trip running at power-off - %lus in, soc %u%% at start",
+             (unsigned long)rec.run_s, rec.start_soc);
+}
+
 static void handle_trip_start(void)
 {
+    /*
+     * The phone can lose track of a running trip: its STATUS query after a
+     * reconnect or a sync can time out, and it then shows the job as stopped.
+     * Restarting here would reset the trip's figures and write a second
+     * TRIP_START, and the phone's parser drops every row before the last one
+     * from the job. Keep the trip running and confirm it instead.
+     */
+    if (s_trip_active) {
+        ESP_LOGW(TAG, "TRIP_START with a trip already running - kept it");
+        marker_done(true);
+        return;
+    }
+
     // Normally the pair is already open. If it is not (no card, or the last
     // rotation could not open the next file), try once more now.
     if (!s_file && !open_log()) {
@@ -593,12 +783,19 @@ static void handle_trip_start(void)
     s_trip_peak_motor_c = 0;
     s_trip_peak_inv_c   = 0;
     s_trip_peak_bms_c   = 0;
+    s_trip_baseline_ok  = true;
     s_trip_active       = true;
 
-    // Marker rows keep each file's own column count so both still parse.
-    fprintf(s_file, "TRIP_START,,,,,,\n");
-    if (s_snap) fprintf(s_snap, "TRIP_START,,,,,,,,,,,,,,,\n");
-    commit();
+    memset(&s_trip_carry, 0, sizeof(s_trip_carry));
+    s_trip_carry.version    = TRIP_REC_VERSION;
+    s_trip_carry.start_soc  = s_trip_start_soc;
+    s_trip_carry.start_unix = rtc_time_valid() ? (uint32_t)time(NULL) : 0;
+
+    write_trip_start_rows();
+
+    // Saved before the phone is told, so an OK always means a power cut
+    // cannot lose the trip.
+    trip_save();
 
     marker_done(true);
     ESP_LOGI(TAG, "Trip started - soc=%u%%", s_trip_start_soc);
@@ -622,22 +819,36 @@ static void handle_trip_end(void)
     }
     s_trip_active = false;
 
+    // Forgotten before the summary is written: a cut in between then leaves
+    // an ended trip without its TRIP_END row, rather than resuming a trip the
+    // driver has ended.
+    trip_forget();
+
     vehicle_state_t st;
     vehicle_state_snapshot(&st);
 
-    uint32_t end_tick   = (uint32_t)(esp_timer_get_time() / 1000);
-    uint32_t duration_s = (end_tick - s_trip_start_tick) / 1000;
-    float    ah_used    = (st.latest.isa_ah  - s_trip_start_ah)  / 3600.0f;
-    float    kwh_used   = (st.latest.isa_kwh - s_trip_start_kwh) / 1000.0f;
+    uint32_t duration_s;
+    int32_t  ah_as, kwh_wh;
+    trip_totals(&st.latest, &duration_s, &ah_as, &kwh_wh);
+    float    ah_used    = ah_as  / 3600.0f;
+    float    kwh_used   = kwh_wh / 1000.0f;
     uint8_t  soc_end    = st.latest.soc;
     float    peak_a     = s_trip_peak_current / 1000.0f;
 
-    // The RTC gives a real start time when it is set; the telematics build had
-    // to derive this from the phone's offset.
-    uint32_t start_unix = 0;
+    /*
+     * The RTC gives a real start time when it is set; the telematics build had
+     * to derive this from the phone's offset. With a start time the duration
+     * is wall-clock, power-off time included, as the phone measures a job;
+     * without one it is the running time summed across power-ups.
+     */
+    uint32_t start_unix = s_trip_carry.start_unix;
     if (rtc_time_valid()) {
         time_t now = time(NULL);
-        start_unix = (uint32_t)(now - (time_t)duration_s);
+        if (start_unix != 0 && (time_t)start_unix <= now) {
+            duration_s = (uint32_t)(now - (time_t)start_unix);
+        } else {
+            start_unix = (uint32_t)(now - (time_t)duration_s);
+        }
     }
 
     if (s_snap) {
@@ -702,6 +913,10 @@ void can_logger_task(void *pvParameters)
     s_marker_sem   = xSemaphoreCreateBinary();
     configASSERT(s_marker_queue && s_marker_sem);
 
+    // Before the card, so STATUS reports a resumed trip from the moment BLE
+    // is up, even while the mount below is still retrying.
+    trip_resume();
+
     // DMA-capable and cache-line aligned, so FATFS's whole-sector writes can
     // go straight from this buffer to the SDMMC DMA without a bounce copy.
     s_filebuf = heap_caps_aligned_alloc(64, FILE_BUF_BYTES,
@@ -743,6 +958,10 @@ void can_logger_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(OPEN_RETRY_MS));
     }
 
+    // A resumed trip carries on in this session. Without files, reopen_log()
+    // writes the row when the status pass gets one open.
+    if (logging && s_trip_active) write_trip_start_rows();
+
     if (!logging) {
         ESP_LOGE(TAG, "Could not open a log file after %d attempts - "
                       "continuing without logging so the fault is visible",
@@ -758,6 +977,7 @@ void can_logger_task(void *pvParameters)
     int64_t last_space   = last_flush;
     int64_t last_status  = last_flush;
     int64_t last_snap    = last_flush;
+    int64_t last_trip    = last_flush;
     int64_t last_recover = 0;   // 0 => first bus-off recovers immediately
 
     can_frame_t f;
@@ -810,6 +1030,13 @@ void can_logger_task(void *pvParameters)
         while (xQueueReceive(s_marker_queue, &marker, 0) == pdTRUE) {
             if (marker == TRIP_MARKER_START) handle_trip_start();
             else                             handle_trip_end();
+        }
+
+        // ── Keep the saved trip current ─────────────────────────────────────
+        if (s_trip_active &&
+            now - last_trip >= (int64_t)TRIP_SAVE_INTERVAL_MS * 1000) {
+            last_trip = now;
+            trip_save();
         }
 
         // ── 1 Hz snapshot ───────────────────────────────────────────────────

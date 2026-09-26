@@ -14,6 +14,9 @@ mid-write and that is the normal case, not an error path.
   so a crash cannot make two boots share a file name.
 - On a full card, delete the oldest `canlog_`/`snap_` pair — never the active
   session.
+- A trip survives power loss. It is saved to NVS at TRIP_START (and refreshed
+  every 60 s), resumed on every boot with a TRIP_START row at the top of the
+  new session, and cleared only by TRIP_END. STATUS reports it from boot.
 
 ## Core split
 
