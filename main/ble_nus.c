@@ -379,8 +379,16 @@ static void handle_trip_marker(trip_marker_t type)
      * the marker really reached a log file; with no card there is nothing to
      * start, and replying OK would tell the phone a trip is recording.
      */
+    /*
+     * TRIP_END can take a while: it clears the saved trip, fsyncs and closes
+     * both files, claims a number and may reclaim space before opening the
+     * next pair. Replying early made the phone sync before the finished
+     * session was listable. Each limit sits inside the phone's own wait for
+     * the reply (5 s for TRIP_START, 10 s for TRIP_END).
+     */
+    const uint32_t wait_ms = (type == TRIP_MARKER_END) ? 8000 : 4000;
     bool ok = false;
-    if (!can_logger_wait_marker(2000, &ok)) {
+    if (!can_logger_wait_marker(wait_ms, &ok)) {
         ESP_LOGW(TAG, "Logger did not handle the trip marker in time");
     } else if (!ok) {
         nus_notify_str("ERR no_log\n");
