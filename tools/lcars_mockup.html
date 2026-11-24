@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tractor Dash LCARS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;600;700&display=swap">
+<style>
+/* Layout: the firmware's 1024x600 dash (top bar 110 / main row 300 / grid 190),
+   framed by two LCARS elbows: header elbow opens down-left, body elbow opens up-left. */
+:root {
+  --void:    #000000;  /* screen ground */
+  --orange:  #ff9c3f;  /* primary frame */
+  --peach:   #ffbb88;  /* secondary frame */
+  --lilac:   #c79bd6;  /* labels / frame */
+  --blue:    #8fa8ff;  /* frame, regen */
+  --gold:    #ffcc55;  /* warn, trip */
+  --red:     #ff4f3c;  /* alert */
+  --idle:    #5f5a78;  /* inactive chip */
+  --readout: #ffe2c2;  /* numeric values */
+  --page:    #0b0a10;  /* area around the panel */
+  --fg:      #e9e2f2;
+  --display: "Antonio", "Arial Narrow", "Roboto Condensed", sans-serif;
+  color-scheme: dark;
+}
+html, body { background: var(--page); color: var(--fg); }
+body {
+  font-family: var(--display);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 24px;
+}
+.wrap { max-width: 1024px; margin: 0 auto; display: grid; gap: 18px; }
+.head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.head h1 { margin: 0; font-weight: 600; font-size: 22px; letter-spacing: .08em; text-transform: uppercase; color: var(--orange); }
+.head p { margin: 0; font-size: 15px; letter-spacing: .04em; color: var(--lilac); }
+
+/* ── Scaled 1024x600 stage ─────────────────────────────────────── */
+.fit { width: 100%; position: relative; overflow: hidden; border-radius: 6px; }
+.stage {
+  position: absolute; left: 0; top: 0; width: 1024px; height: 600px;
+  transform-origin: 0 0; background: var(--void); overflow: hidden;
+  font-variant-numeric: tabular-nums;
+}
+.stage * { position: absolute; box-sizing: border-box; }
+.txt { color: var(--void); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+
+/* Header elbow */
+.a-side { left: 0; top: 0; width: 150px; height: 110px; background: var(--orange);
+  border-bottom-left-radius: 54px; }
+.a-side .txt { right: 12px; top: 10px; font-size: 30px; line-height: 1; text-align: right; }
+.a-side .sub { right: 12px; top: 44px; font-size: 15px; letter-spacing: .1em; }
+.a-fillet { left: 150px; top: 72px; width: 24px; height: 24px; background: var(--orange); }
+.a-fillet::after { content: ""; position: absolute; inset: 0; background: var(--void); border-bottom-left-radius: 24px; }
+.bar { height: 14px; }
+.a-bar { top: 96px; }
+
+/* Body elbow */
+.b-side { left: 0; top: 118px; width: 150px; height: 282px; background: var(--peach);
+  border-top-left-radius: 54px; }
+.b-fillet { left: 150px; top: 132px; width: 24px; height: 24px; background: var(--peach); }
+.b-fillet::after { content: ""; position: absolute; inset: 0; background: var(--void); border-top-left-radius: 24px; }
+.b-bar { top: 118px; }
+.seg-lbl { right: 12px; bottom: 8px; font-size: 18px; }
+.side2 { left: 0; top: 406px; width: 150px; height: 128px; background: var(--lilac); }
+.side3 { left: 0; top: 540px; width: 150px; height: 60px; background: var(--blue); }
+.side3 .seg-lbl { bottom: 6px; font-size: 15px; }
+
+/* Divider between main row and grid */
+.mid-bar { top: 400px; height: 6px; }
+
+/* Header content */
+.chips { left: 188px; top: 22px; height: 46px; display: flex; gap: 10px; }
+.chips > *, .chips > * * { position: static; }
+.chip { height: 46px; min-width: 112px; padding: 0 18px; border-radius: 23px;
+  display: flex; align-items: flex-end; justify-content: flex-end; padding-bottom: 6px;
+  font-size: 22px; background: var(--idle); transition: background .25s; }
+.chip.ok { background: var(--orange); }
+.chip.link { background: var(--blue); }
+.chip.alert { background: var(--red); }
+.chip.trip { background: var(--gold); }
+.chip.off { background: transparent; outline: 2px solid var(--idle); outline-offset: -2px; color: var(--idle); }
+.clock { right: 20px; top: 4px; font-size: 58px; line-height: 1; font-weight: 600; color: var(--orange); letter-spacing: .02em; }
+.date { right: 22px; top: 66px; font-size: 18px; color: var(--lilac); text-transform: uppercase; letter-spacing: .14em; }
+
+/* Main row */
+.big { top: 156px; height: 236px; }
+.big .val { left: 0; right: 0; top: 0; text-align: center; font-size: 150px; line-height: 190px;
+  font-weight: 600; color: var(--readout); transition: color .3s; }
+.big .unit { left: 50%; transform: translateX(-50%); bottom: 4px; height: 30px; padding: 0 16px 2px; border-radius: 15px;
+  font-size: 20px; display: flex; align-items: flex-end; }
+.big .unit.u1 { background: var(--orange); }
+.big .unit.u2 { background: var(--lilac); }
+.big .unit.u3 { background: var(--blue); }
+.vsep { top: 176px; width: 4px; height: 196px; background: #26222f; }
+
+/* Bottom grid */
+.cell { height: 88px; }
+.cell .cap { left: 10px; top: 6px; height: 24px; padding: 0 12px 1px; border-radius: 12px;
+  font-size: 16px; display: flex; align-items: flex-end; background: var(--lilac); }
+.cell:nth-child(5n+2) .cap { background: var(--peach); }
+.cell:nth-child(5n+3) .cap { background: var(--blue); }
+.cell:nth-child(5n+4) .cap { background: var(--orange); }
+.cell .v { right: 16px; bottom: 2px; font-size: 42px; line-height: 1; font-weight: 600; color: var(--readout); transition: color .3s; }
+#c-cells { font-size: 36px; }
+.warn  { color: var(--gold) !important; }
+.alert { color: var(--red) !important; }
+.regen { color: var(--blue) !important; }
+.stale { color: var(--idle) !important; }
+
+@keyframes blink { 50% { opacity: .35; } }
+.chip.alert.pulse { animation: blink 1.2s steps(2, jump-none) infinite; }
+@media (prefers-reduced-motion: reduce) { .chip.alert.pulse { animation: none; } .chip, .val, .v { transition: none; } }
+
+/* ── Scenario controls ─────────────────────────────────────────── */
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.controls span { font-size: 15px; letter-spacing: .12em; text-transform: uppercase; color: var(--lilac); margin-right: 4px; }
+.controls button {
+  font: 600 17px/1 var(--display); letter-spacing: .08em; text-transform: uppercase;
+  border: 0; border-radius: 18px; height: 36px; padding: 0 20px 4px; cursor: pointer;
+  display: inline-flex; align-items: flex-end; color: var(--void); background: var(--idle);
+}
+.controls button[aria-pressed="true"] { background: var(--orange); }
+.controls button:hover { filter: brightness(1.12); }
+.controls button:focus-visible { outline: 3px solid var(--readout); outline-offset: 2px; }
+.note { font-size: 15px; line-height: 1.5; color: var(--lilac); max-width: 70ch; margin: 0; letter-spacing: .02em; }
+</style>
+
+<div class="wrap">
+  <div class="head">
+    <h1>Dash · LCARS treatment</h1>
+    <p>1024 × 600 · same layout as ui_dash.c · values are simulated</p>
+  </div>
+
+  <div class="fit" id="fit">
+    <div class="stage" id="stage">
+      <!-- Header elbow -->
+      <div class="a-side"><div class="txt">SOMERSET<br>EV</div></div>
+      <div class="a-fillet"></div>
+      <div class="bar a-bar" style="left:150px;width:354px;background:var(--orange)"></div>
+      <div class="bar a-bar" style="left:510px;width:90px;background:var(--lilac)"></div>
+      <div class="bar a-bar" style="left:606px;width:240px;background:var(--peach)"></div>
+      <div class="bar a-bar" style="left:852px;width:172px;background:var(--blue);border-radius:0 7px 7px 0"></div>
+
+      <div class="chips">
+        <div class="chip txt ok"   id="chipSd">SD LOG</div>
+        <div class="chip txt link" id="chipBle">BLE</div>
+        <div class="chip txt ok"   id="chipCan">CAN OK</div>
+        <div class="chip txt trip" id="chipTrip">TRIP</div>
+      </div>
+      <div class="clock" id="clock">--:--</div>
+      <div class="date" id="date">no clock</div>
+
+      <!-- Body elbow -->
+      <div class="b-side"><div class="txt seg-lbl">DRIVE 01</div></div>
+      <div class="b-fillet"></div>
+      <div class="bar b-bar" style="left:150px;width:144px;background:var(--peach)"></div>
+      <div class="bar b-bar" style="left:300px;width:420px;background:var(--orange)"></div>
+      <div class="bar b-bar" style="left:726px;width:60px;background:var(--red)"></div>
+      <div class="bar b-bar" style="left:792px;width:232px;background:var(--lilac);border-radius:0 7px 7px 0"></div>
+
+      <div class="side2"><div class="txt seg-lbl">SYSTEMS 02</div></div>
+      <div class="side3"><div class="txt seg-lbl" id="session">SESSION 0042</div></div>
+
+      <div class="mid-bar" style="left:166px;width:240px;background:var(--lilac)"></div>
+      <div class="mid-bar" style="left:412px;width:500px;background:#2c2738"></div>
+      <div class="mid-bar" style="left:918px;width:106px;background:var(--blue);border-radius:0 3px 3px 0"></div>
+
+      <!-- Main row: RPM / MPH / kW, widths scaled from 400/254/370 -->
+      <div class="big" style="left:166px;width:335px"><div class="val" id="rpm">--</div><div class="unit txt u1">RPM</div></div>
+      <div class="vsep" style="left:500px"></div>
+      <div class="big" style="left:503px;width:211px"><div class="val" id="mph">--</div><div class="unit txt u2">MPH</div></div>
+      <div class="vsep" style="left:713px"></div>
+      <div class="big" style="left:716px;width:308px"><div class="val" id="kw">--</div><div class="unit txt u3" style="text-transform:none">kW</div></div>
+
+      <!-- Bottom grid -->
+      <div id="grid"></div>
+    </div>
+  </div>
+
+  <div class="controls" role="group" aria-label="Scenario">
+    <span>Scenario</span>
+    <button type="button" id="sc-drive" data-sc="drive" aria-pressed="true">Driving</button>
+    <button type="button" id="sc-regen" data-sc="regen" aria-pressed="false">Regen</button>
+    <button type="button" id="sc-hot"   data-sc="hot"   aria-pressed="false">Hot motor</button>
+    <button type="button" id="sc-low"   data-sc="low"   aria-pressed="false">Low SOC</button>
+    <button type="button" id="sc-stale" data-sc="stale" aria-pressed="false">CAN stale</button>
+    <button type="button" id="sc-nosd"  data-sc="nosd"  aria-pressed="false">No SD</button>
+  </div>
+  <p class="note">The state rules follow refresh_cb(): temperatures go gold at 60 °C and red at 80 °C, SOC goes red under 15 %, negative kW reads in blue as regen, and every value drops to "--" when no frame has arrived for 2 s.</p>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const stage = $('stage'), fit = $('fit');
+
+  function scale() {
+    const s = Math.min(1, fit.clientWidth / 1024);
+    stage.style.transform = `scale(${s})`;
+    fit.style.height = (600 * s) + 'px';
+  }
+  new ResizeObserver(scale).observe(fit);
+  scale();
+
+  // Grid in the firmware's display order.
+  const cells = [
+    ['batt',  'BATT °C'], ['motor', 'MOTOR °C'], ['amps', 'AMPS'],   ['soc',   'SOC'],     ['packv', 'PACK V'],
+    ['inv',   'INV °C'],  ['chg',   'CHG °C'],   ['lv',   '12V'],    ['cells', 'CELL mV'], ['delta', 'DELTA mV'],
+  ];
+  const grid = $('grid'), cw = 858 / 5;
+  cells.forEach(([id, label], i) => {
+    const c = document.createElement('div');
+    c.className = 'cell';
+    c.style.left = (166 + (i % 5) * cw) + 'px';
+    c.style.width = cw + 'px';
+    c.style.top = (414 + Math.floor(i / 5) * 92) + 'px';
+    c.innerHTML = `<div class="cap txt"${label.includes("mV") ? " style=\"text-transform:none\"" : ""}>${label}</div><div class="v" id="c-${id}">--</div>`;
+    grid.appendChild(c);
+  });
+
+  let sc = 'drive', t = 0;
+  document.querySelectorAll('[data-sc]').forEach(b => b.addEventListener('click', () => {
+    sc = b.dataset.sc;
+    document.querySelectorAll('[data-sc]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  }));
+
+  const set = (id, txt, cls) => {
+    const el = $(id);
+    if (el.textContent !== txt) el.textContent = txt;
+    el.classList.remove('warn', 'alert', 'regen', 'stale');
+    if (cls) el.classList.add(cls);
+  };
+  const tcls = c => c >= 80 ? 'alert' : c >= 60 ? 'warn' : '';
+  const chip = (id, txt, cls) => { const el = $(id); el.textContent = txt; el.className = 'chip txt ' + cls; };
+
+  function tick() {
+    t += 0.1;
+    const now = new Date();
+    $('clock').textContent = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    $('date').textContent = now.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short' });
+
+    chip('chipSd', sc === 'nosd' ? 'NO SD' : 'SD LOG', sc === 'nosd' ? 'alert' : 'ok');
+    chip('chipBle', 'BLE', 'link');
+    chip('chipTrip', 'TRIP', 'trip');
+
+    if (sc === 'stale') {
+      chip('chipCan', 'CAN STALE', 'alert pulse');
+      ['rpm', 'mph', 'kw'].forEach(id => set(id, '--', 'stale'));
+      cells.forEach(([id]) => set('c-' + id, '--', 'stale'));
+      return;
+    }
+    chip('chipCan', 'CAN OK', 'ok');
+
+    const w = Math.sin(t * 0.7) * 0.5 + Math.sin(t * 2.3) * 0.15;
+    const regen = sc === 'regen';
+    const rpm = Math.round((regen ? 1700 : 2350) + w * 420);
+    const mph = Math.min(25, Math.round(rpm / 140));
+    const amps = regen ? -(38 + w * 12) : 92 + w * 40;
+    const packv = 356.4 - amps * 0.012;
+    const kw = packv * amps / 1000;
+    const hot = sc === 'hot';
+    const motor = hot ? 84.6 + w * 2 : 47.2 + w * 3;
+    const inv = hot ? 66.3 + w : 41.8 + w * 2;
+    const soc = sc === 'low' ? 11 : 68;
+    const cmin = 3712 + Math.round(w * 6), cmax = cmin + 14 + Math.round(Math.abs(w) * 4);
+
+    set('rpm', String(rpm));
+    set('mph', String(mph));
+    set('kw', kw.toFixed(1), kw < 0 ? 'regen' : '');
+
+    set('c-batt',  (31.4 + w).toFixed(1));
+    set('c-motor', motor.toFixed(1), tcls(motor));
+    set('c-amps',  amps.toFixed(1), amps < 0 ? 'regen' : '');
+    set('c-soc',   soc + '%', soc < 15 ? 'alert' : '');
+    set('c-packv', packv.toFixed(1));
+    set('c-inv',   inv.toFixed(1), tcls(inv));
+    set('c-chg',   (24.0 + w * 0.5).toFixed(1));
+    set('c-lv',    (13.8 + w * 0.05).toFixed(1));
+    set('c-cells', cmin + '/' + cmax);
+    set('c-delta', String(cmax - cmin));
+  }
+  tick();
+  setInterval(tick, 100);
+})();
+</script>

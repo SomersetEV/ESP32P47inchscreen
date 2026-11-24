@@ -7,12 +7,15 @@
 static const char *TAG = "UI";
 
 lv_font_t *ui_font_huge;
-lv_font_t *ui_font_medium;
+lv_font_t *ui_font_clock;
+lv_font_t *ui_font_title;
+lv_font_t *ui_font_value;
+lv_font_t *ui_font_label;
 lv_font_t *ui_font_small;
 
 // EMBED_FILES symbols for the assets in main/assets.
-extern const uint8_t ttf_start[] asm("_binary_Montserrat_Medium_ttf_start");
-extern const uint8_t ttf_end[]   asm("_binary_Montserrat_Medium_ttf_end");
+extern const uint8_t ttf_start[] asm("_binary_Antonio_SemiBold_ttf_start");
+extern const uint8_t ttf_end[]   asm("_binary_Antonio_SemiBold_ttf_end");
 
 static lv_obj_t *s_splash;
 static lv_obj_t *s_dash;
@@ -117,17 +120,24 @@ esp_err_t ui_start(void)
     bsp_display_lock(0);
 
     const size_t ttf_len = (size_t)(ttf_end - ttf_start);
-    ui_font_huge   = lv_tiny_ttf_create_data(ttf_start, ttf_len, 150);
-    ui_font_medium = lv_tiny_ttf_create_data(ttf_start, ttf_len, 34);
-    ui_font_small  = lv_tiny_ttf_create_data(ttf_start, ttf_len, 26);
+    ui_font_huge  = lv_tiny_ttf_create_data(ttf_start, ttf_len, 150);
+    ui_font_clock = lv_tiny_ttf_create_data(ttf_start, ttf_len, 58);
+    ui_font_title = lv_tiny_ttf_create_data(ttf_start, ttf_len, 30);
+    ui_font_value = lv_tiny_ttf_create_data(ttf_start, ttf_len, 42);
+    ui_font_label = lv_tiny_ttf_create_data(ttf_start, ttf_len, 22);
+    ui_font_small = lv_tiny_ttf_create_data(ttf_start, ttf_len, 17);
 
-    if (!ui_font_huge || !ui_font_medium || !ui_font_small) {
+    if (!ui_font_huge || !ui_font_clock || !ui_font_title || !ui_font_value ||
+        !ui_font_label || !ui_font_small) {
         // Fall back to the built-in bitmap font rather than crashing; the dash
         // is still readable, just not as large.
         ESP_LOGW(TAG, "tiny_ttf font creation failed, falling back to Montserrat 28");
-        ui_font_huge   = (lv_font_t *)&lv_font_montserrat_28;
-        ui_font_medium = (lv_font_t *)&lv_font_montserrat_28;
-        ui_font_small  = (lv_font_t *)&lv_font_montserrat_28;
+        ui_font_huge  = (lv_font_t *)&lv_font_montserrat_28;
+        ui_font_clock = (lv_font_t *)&lv_font_montserrat_28;
+        ui_font_title = (lv_font_t *)&lv_font_montserrat_28;
+        ui_font_value = (lv_font_t *)&lv_font_montserrat_28;
+        ui_font_label = (lv_font_t *)&lv_font_montserrat_28;
+        ui_font_small = (lv_font_t *)&lv_font_montserrat_28;
     }
 
     s_dash   = ui_dash_create();

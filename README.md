@@ -130,22 +130,27 @@ Both live in `main/Kconfig.projbuild` and are one line each:
 `DASH_SIMULATE_CAN` feeds synthetic frames through the normal decode path so the
 dash can be exercised on the bench. Never enable it on the tractor.
 
-## Logos
+## Logo and dash style
 
-Two PNGs are embedded, both decoded at runtime:
+One PNG is embedded and decoded at runtime:
 
 | File | Where it shows | Size |
 |---|---|---|
 | `main/assets/splash_logo.png` | Centered on the boot splash | 420x251 |
-| `main/assets/dash_logo.png` | Top-left slot of the dash's top bar | 200x100 |
 
-To change either one, replace the file and rebuild. The image descriptors use
-fixed dimensions, so a new logo must be the same size as the old one. If it is
-not, update `SPLASH_LOGO_W`/`SPLASH_LOGO_H` in `main/ui/ui_splash.c` or the
-width and height set on `s_logo` in `main/ui/ui_dash.c`.
+To change it, replace the file and rebuild. The image descriptor uses fixed
+dimensions, so a new logo must be the same size as the old one. If it is not,
+update `SPLASH_LOGO_W`/`SPLASH_LOGO_H` in `main/ui/ui_splash.c`.
 
 The splash logo is deliberately small. A full-screen splash bitmap made every
 frame of the fade blend all 1024x600 pixels, and the fade stuttered.
+
+The dash uses an LCARS-style frame (`main/ui/ui_dash.c`) drawn from plain LVGL
+rectangles, with the name set as text in the header elbow instead of a logo.
+Text is Antonio SemiBold (`main/assets/Antonio-SemiBold.ttf`, SIL Open Font
+License, see `Antonio-OFL.txt`), rendered with tiny_ttf. `tools/lcars_mockup.html`
+is the browser mockup the layout was taken from; it runs simulated values and
+can be opened directly.
 
 ## Log files
 

@@ -5,7 +5,7 @@ idf_component_register(
          "ui/ui.c" "ui/ui_splash.c" "ui/ui_dash.c" "ui/sim_can.c"
          "ui/ui_brightness.c"
     INCLUDE_DIRS "." "ui"
-    EMBED_FILES "assets/splash_logo.png" "assets/dash_logo.png" "assets/Montserrat-Medium.ttf"
+    EMBED_FILES "assets/splash_logo.png" "assets/Antonio-SemiBold.ttf"
     REQUIRES esp_driver_twai nvs_flash fatfs sdmmc esp_driver_sdmmc esp_timer bt driver)
 
 # The ESP32-P4 has one SDMMC controller shared by both slots: the SD card on
